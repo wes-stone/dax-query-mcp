@@ -37,7 +37,13 @@ mcp = FastMCP("dax-query-server")
 
 @mcp.tool()
 def list_connections(connections_dir: str = DEFAULT_CONNECTIONS_DIR) -> str:
-    """List the configured semantic model connections."""
+    """List the configured semantic model connections.
+
+    When a connection has has_context_markdown=true, call get_connection_context
+    to read its curated column/measure/filter documentation BEFORE writing
+    any DAX queries. Do NOT use INFO.*() or $SYSTEM queries for metadata —
+    they require admin privileges.
+    """
     connections = load_connections(connections_dir)
     payload = {
         "connections_dir": str(resolve_connections_dir(connections_dir)),
@@ -62,7 +68,17 @@ def get_connection_context(
     connection_name: str,
     connections_dir: str = DEFAULT_CONNECTIONS_DIR,
 ) -> str:
-    """Return metadata and markdown context for a named connection."""
+    """Return metadata and markdown context for a named connection.
+
+    IMPORTANT: This is the PRIMARY way to discover tables, columns, measures,
+    and filters for a connection. The context_markdown field contains a curated
+    description of the semantic model — use it INSTEAD of running INFO.*() or
+    $SYSTEM.DISCOVER_* queries, which require admin privileges and will fail
+    for most users.
+
+    Always call this FIRST when you need to know what columns or measures
+    are available before writing a DAX query.
+    """
     connection = _get_connection(connection_name, connections_dir)
     payload = {
         "connection_name": connection.name,
@@ -83,9 +99,13 @@ def run_connection_query(
     preview_rows: int = DEFAULT_PREVIEW_ROWS,
     max_rows: int | None = None,
 ) -> str:
-    """Run an ad hoc query against a named connection and return a preview.
+    """Run an ad hoc DAX query against a named connection and return a preview.
 
-    IMPORTANT: When presenting results to the user, render the response_markdown
+    IMPORTANT: Do NOT use INFO.*() or $SYSTEM.DISCOVER_* queries — they require
+    admin privileges and will fail. Use get_connection_context to discover
+    available tables, columns, and measures instead.
+
+    When presenting results to the user, render the response_markdown
     field EXACTLY as-is — including the numbered "What would you like to do next?"
     list at the end. Do NOT summarize, paraphrase, or omit those options.
     """
@@ -121,9 +141,13 @@ def run_connection_query_markdown(
     preview_rows: int = DEFAULT_PREVIEW_ROWS,
     max_rows: int | None = None,
 ) -> str:
-    """Run an ad hoc query against a named connection and return a ready-to-present markdown preview table.
+    """Run an ad hoc DAX query against a named connection and return a ready-to-present markdown preview table.
 
-    IMPORTANT: Render the returned markdown EXACTLY as-is to the user — including the
+    IMPORTANT: Do NOT use INFO.*() or $SYSTEM.DISCOVER_* queries — they require
+    admin privileges and will fail. Use get_connection_context to discover
+    available tables, columns, and measures instead.
+
+    Render the returned markdown EXACTLY as-is to the user — including the
     numbered "What would you like to do next?" list. Do NOT summarize or omit those options.
     """
     payload = json.loads(
@@ -200,7 +224,15 @@ def inspect_connection(
     preview_rows: int = DEFAULT_PREVIEW_ROWS,
     command_timeout_seconds: int | None = None,
 ) -> str:
-    """Inspect model metadata for a named connection using non-admin MDSCHEMA rowsets. Present previews as markdown tables."""
+    """Inspect model metadata using non-admin MDSCHEMA rowsets.
+
+    Prefer get_connection_context first — it returns curated markdown
+    documentation without hitting the server.  Use inspect_connection only
+    when you need live schema discovery beyond what the context provides.
+
+    This tool uses safe $SYSTEM.MDSCHEMA_* rowsets — never INFO.*() or
+    $SYSTEM.DISCOVER_* which require admin privileges.
+    """
     return _to_json(
         inspect_connection_metadata(
             connection_name=connection_name,
@@ -316,9 +348,13 @@ def run_ad_hoc_query(
     command_timeout_seconds: int = 1800,
     max_rows: int | None = None,
 ) -> str:
-    """Run an ad hoc DAX or rowset query against a semantic model connection.
+    """Run an ad hoc DAX query against a raw connection string.
 
-    IMPORTANT: Render response_markdown EXACTLY as-is to the user — including the
+    IMPORTANT: Do NOT use INFO.*() or $SYSTEM.DISCOVER_* queries — they require
+    admin privileges and will fail. Use get_connection_context (for named
+    connections) or inspect_connection to discover model metadata instead.
+
+    Render response_markdown EXACTLY as-is to the user — including the
     numbered "What would you like to do next?" list. Do NOT summarize or omit those options.
     """
     dataframe = dax_to_pandas(
