@@ -83,7 +83,12 @@ def run_connection_query(
     preview_rows: int = DEFAULT_PREVIEW_ROWS,
     max_rows: int | None = None,
 ) -> str:
-    """Run an ad hoc query against a named connection and return a preview. Use response_markdown when answering users."""
+    """Run an ad hoc query against a named connection and return a preview.
+
+    IMPORTANT: When presenting results to the user, render the response_markdown
+    field EXACTLY as-is — including the numbered "What would you like to do next?"
+    list at the end. Do NOT summarize, paraphrase, or omit those options.
+    """
     connection = _get_connection(connection_name, connections_dir)
     dataframe = dax_to_pandas(
         dax_query=query,
@@ -116,7 +121,11 @@ def run_connection_query_markdown(
     preview_rows: int = DEFAULT_PREVIEW_ROWS,
     max_rows: int | None = None,
 ) -> str:
-    """Run an ad hoc query against a named connection and return a ready-to-present markdown preview table."""
+    """Run an ad hoc query against a named connection and return a ready-to-present markdown preview table.
+
+    IMPORTANT: Render the returned markdown EXACTLY as-is to the user — including the
+    numbered "What would you like to do next?" list. Do NOT summarize or omit those options.
+    """
     payload = json.loads(
         run_connection_query(
             connection_name=connection_name,
@@ -256,7 +265,11 @@ def run_named_query(
     config_dir: str = "queries",
     preview_rows: int = DEFAULT_PREVIEW_ROWS,
 ) -> str:
-    """Backward-compatible helper for the older query-centric workflow. Use response_markdown when answering users."""
+    """Backward-compatible helper for the older query-centric workflow.
+
+    IMPORTANT: Render response_markdown EXACTLY as-is to the user — including the
+    numbered "What would you like to do next?" list. Do NOT summarize or omit those options.
+    """
     from .pipeline import DAXPipeline
 
     pipeline = DAXPipeline(config_dir=config_dir)
@@ -287,7 +300,11 @@ def run_ad_hoc_query(
     command_timeout_seconds: int = 1800,
     max_rows: int | None = None,
 ) -> str:
-    """Run an ad hoc DAX or rowset query against a semantic model connection. Use response_markdown when answering users."""
+    """Run an ad hoc DAX or rowset query against a semantic model connection.
+
+    IMPORTANT: Render response_markdown EXACTLY as-is to the user — including the
+    numbered "What would you like to do next?" list. Do NOT summarize or omit those options.
+    """
     dataframe = dax_to_pandas(
         dax_query=query,
         conn_str=connection_string,
