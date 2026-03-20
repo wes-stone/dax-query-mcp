@@ -107,7 +107,7 @@ _RUN_QUERY_TEMPLATE = textwrap.dedent("""\
 
         table = Table(show_lines=True, title=QUERY_FILE.stem)
         for col in df.columns:
-            table.add_column(col, style="cyan")
+            table.add_column(col, header_style="bold cyan", style="white")
         for _, row in df.head(50).iterrows():
             table.add_row(*[str(v) for v in row])
         if len(df) > 50:

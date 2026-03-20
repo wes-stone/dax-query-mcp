@@ -62,6 +62,7 @@ dax_query: |
     pipeline.run_query("sales", preview=True)
 
     output = capsys.readouterr().out
-    assert "--- Preview (markdown) ---" in output
-    assert "| Value | Label |" in output
+    assert "Preview" in output
+    assert "Value" in output
+    assert "Label" in output
 

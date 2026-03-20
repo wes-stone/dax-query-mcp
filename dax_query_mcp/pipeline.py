@@ -128,8 +128,27 @@ class DAXPipeline:
 
     @staticmethod
     def _preview(dataframe: pd.DataFrame) -> None:
-        print("\n--- Preview (markdown) ---")
-        print(dataframe_to_markdown(dataframe, max_rows=5))
-        print("\n--- Column info (markdown) ---")
-        print(dataframe_dtypes_to_markdown(dataframe))
+        from rich.console import Console
+        from rich.table import Table
+
+        console = Console()
+
+        # Data preview
+        preview_df = dataframe.head(5)
+        data_table = Table(show_lines=True, title="Preview")
+        for col in preview_df.columns:
+            data_table.add_column(str(col), header_style="bold cyan", style="white")
+        for _, row in preview_df.iterrows():
+            data_table.add_row(*[str(v) for v in row])
+        if len(dataframe) > 5:
+            data_table.caption = f"Showing 5 of {len(dataframe)} rows"
+        console.print(data_table)
+
+        # Column info
+        info_table = Table(title="Column Info", show_lines=True)
+        info_table.add_column("Column", header_style="bold cyan", style="white")
+        info_table.add_column("Type", header_style="bold cyan", style="white")
+        for col in dataframe.columns:
+            info_table.add_row(str(col), str(dataframe[col].dtype))
+        console.print(info_table)
 
