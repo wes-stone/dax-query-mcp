@@ -390,7 +390,7 @@ _SUGGESTED_ACTIONS = [
     "Filter to a specific account (Top Parent or TPID)",
     "Aggregate (e.g., total by month across all accounts)",
     "Save as a reusable query via save_query_builder",
-    "Export to a portable Python workspace via scaffold_dax_workspace (creates a standalone folder with run_query.py, the .dax file, and a pyproject.toml — ready to `uv run` or paste into a notebook)",
+    "Export to a portable Python workspace via scaffold_dax_workspace — ask the user where to save it first",
 ]
 
 
@@ -415,8 +415,9 @@ def scaffold_dax_workspace(
     into a notebook.  Contains: run_query.py, queries/<name>.dax, pyproject.toml,
     and a README.
 
-    Use this when a user is happy with a DAX query and wants to export / port it
-    to a separate project for further analysis.
+    IMPORTANT: Always ask the user where they want to save the workspace before
+    calling this tool. Do NOT pick a directory on their behalf. Ask them for the
+    output_dir path first.
     """
     conn_str = ""
     if connection_name:
