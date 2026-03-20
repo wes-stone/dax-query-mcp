@@ -104,3 +104,34 @@ def test_scaffold_appends_dax_extension(tmp_path: Path) -> None:
     output = tmp_path / "proj"
     result = scaffold_workspace(output, query_text="EVALUATE ROW('x', 1)", query_name="my-query")
     assert result["query_filename"] == "my-query.dax"
+
+
+def test_scaffold_multiline_connection_string_produces_valid_python(tmp_path: Path) -> None:
+    """Connection strings with newlines must not break the generated script."""
+    output = tmp_path / "multiline"
+    scaffold_workspace(
+        output,
+        query_text="EVALUATE ROW('x', 1)",
+        connection_string=(
+            "Provider=MSOLAP.8;\n"
+            "Data Source=powerbi://api.powerbi.com/v1.0/myorg/Workspace;\n"
+            'Initial Catalog="My Model"'
+        ),
+    )
+    script = (output / "run_query.py").read_text(encoding="utf-8")
+    # Must compile without SyntaxError
+    compile(script, "run_query.py", "exec")
+    # Connection string should be on one line
+    assert "\\n" not in script.split("CONNECTION_STRING")[1].split("\n")[0]
+
+
+def test_scaffold_connection_string_with_quotes(tmp_path: Path) -> None:
+    """Double quotes in connection strings must be escaped."""
+    output = tmp_path / "quotes"
+    scaffold_workspace(
+        output,
+        query_text="EVALUATE ROW('x', 1)",
+        connection_string='Provider=MSOLAP;Initial Catalog="My Model"',
+    )
+    script = (output / "run_query.py").read_text(encoding="utf-8")
+    compile(script, "run_query.py", "exec")

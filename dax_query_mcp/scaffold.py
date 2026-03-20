@@ -206,13 +206,25 @@ def scaffold_workspace(
     # Write run_query.py
     run_script = output / "run_query.py"
     conn_placeholder = connection_string or "YOUR_CONNECTION_STRING_HERE"
+    # Collapse newlines/whitespace in connection strings to prevent broken string literals
+    conn_placeholder = " ".join(conn_placeholder.split())
     run_script.write_text(
         _RUN_QUERY_TEMPLATE.format(
-            connection_string=conn_placeholder,
+            connection_string=conn_placeholder.replace("\\", "\\\\").replace('"', '\\"'),
             query_filename=query_filename,
         ),
         encoding="utf-8",
     )
+
+    # Validate generated script is valid Python
+    script_source = run_script.read_text(encoding="utf-8")
+    try:
+        compile(script_source, str(run_script), "exec")
+    except SyntaxError as exc:
+        raise RuntimeError(
+            f"Generated run_query.py has a syntax error (line {exc.lineno}): {exc.msg}. "
+            f"This is a bug in scaffold — please report it."
+        ) from exc
 
     # Write pyproject.toml
     pyproject = output / "pyproject.toml"

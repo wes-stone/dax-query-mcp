@@ -416,8 +416,13 @@ def scaffold_dax_workspace(
     and a README.
 
     IMPORTANT: Always ask the user where they want to save the workspace before
-    calling this tool. Do NOT pick a directory on their behalf. Ask them for the
-    output_dir path first.
+    calling this tool. Do NOT pick a directory on their behalf.
+
+    After scaffolding, explain to the user:
+    1. What files were created and what each one does
+    2. How to run it: `cd <output_dir> && uv run run_query.py`
+    3. That they can copy dax_to_pandas() from run_query.py into any notebook
+    4. To edit CONNECTION_STRING in run_query.py if it shows a placeholder
     """
     conn_str = ""
     if connection_name:
