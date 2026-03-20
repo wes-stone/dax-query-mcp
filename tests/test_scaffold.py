@@ -60,6 +60,7 @@ def test_scaffold_run_query_has_placeholder(tmp_path: Path) -> None:
     script = (output / "run_query.py").read_text(encoding="utf-8")
     assert "YOUR_CONNECTION_STRING_HERE" in script
     assert "dax_to_pandas" in script
+    assert "_clean_column_name" in script
 
 
 def test_scaffold_embeds_connection_string(tmp_path: Path) -> None:

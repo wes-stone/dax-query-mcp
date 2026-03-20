@@ -83,6 +83,13 @@ _RUN_QUERY_TEMPLATE = textwrap.dedent("""\
         return value
 
 
+    def _clean_column_name(name: str) -> str:
+        \"\"\"Strip table prefixes like 'Calendar[Fiscal Month]' → 'Fiscal_Month'.\"\"\"
+        if "[" in name and "]" in name:
+            name = name[name.find("[") + 1 : name.find("]")]
+        return name.replace(" ", "_")
+
+
     if __name__ == "__main__":
         from rich.console import Console
         from rich.table import Table
@@ -95,6 +102,7 @@ _RUN_QUERY_TEMPLATE = textwrap.dedent("""\
         console = Console()
         console.print(f"[bold]Running {{QUERY_FILE.name}} ...[/bold]")
         df = dax_to_pandas(dax, CONNECTION_STRING)
+        df.columns = [_clean_column_name(c) for c in df.columns]
         console.print(f"[green]{{len(df)}} rows x {{len(df.columns)}} cols[/green]\\n")
 
         table = Table(show_lines=True, title=QUERY_FILE.stem)
