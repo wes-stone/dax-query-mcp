@@ -97,7 +97,8 @@ def test_query_builder_exports_dax_studio_compatible_fields() -> None:
     assert len(payload["Columns"]) == 2
     assert payload["Columns"][0]["TabularObject"]["TableName"] == "Calendar"
     assert payload["Columns"][0]["SortDirection"] == "ASC"
-    assert payload["Columns"][1]["IsOverriden"] is True
+    assert payload["Columns"][1]["IsOverriden"] is False
+    assert payload["Columns"][1]["IsModelItem"] is True
     assert payload["Filters"]["Items"] == []
 
 

@@ -439,9 +439,9 @@ def _build_dax_studio_measure_payload(
             measure_expression=measure.expression,
         ),
         "SelectedTable": _build_table_stub(table_name),
-        "IsModelItem": False,
+        "IsModelItem": True,
         "Caption": measure.caption,
-        "IsOverriden": True,
+        "IsOverriden": False,
         "MeasureExpression": measure.expression,
         "SortDirection": _normalize_sort_direction(sort_direction),
     }
