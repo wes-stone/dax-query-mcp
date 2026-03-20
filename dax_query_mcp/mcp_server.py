@@ -150,7 +150,12 @@ def save_query_builder(
     queries_dir: str = "queries",
     overwrite: bool = False,
 ) -> str:
-    """Save .dax and .dax.queryBuilder artifacts from a structured query builder JSON payload."""
+    """Save .dax and .dax.queryBuilder artifacts from a structured query builder JSON payload.
+
+    IMPORTANT: Always ask the user where they want to save the query files before
+    calling this tool. Do NOT pick a directory on their behalf. Use their answer
+    as the queries_dir parameter.
+    """
     try:
         definition = query_builder_from_dict(json.loads(query_builder_json))
     except ValueError as exc:
