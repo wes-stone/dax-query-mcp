@@ -10,6 +10,7 @@ from loguru import logger
 from .mcp_server import inspect_connection_metadata
 from .pipeline import DAXPipeline
 from .query_builder import load_query_builder_definition_file, save_query_builder_artifacts
+from .scaffold import scaffold_workspace
 
 
 def main() -> int:
@@ -28,6 +29,19 @@ def main() -> int:
         )
         print(json.dumps(payload, indent=2, default=str))
         logger.info(f"Query builder save completed in {time.time() - start_time:.2f}s")
+        return 0
+
+    if args.scaffold:
+        payload = scaffold_workspace(
+            args.scaffold,
+            query_file=args.scaffold_query,
+            query_text=args.scaffold_dax,
+            query_name=args.scaffold_name or "query",
+            project_name=args.scaffold_project_name,
+            overwrite=args.overwrite_query_builder,
+        )
+        print(json.dumps(payload, indent=2, default=str))
+        logger.info(f"Workspace scaffolded in {time.time() - start_time:.2f}s")
         return 0
 
     if args.inspect_connection:
@@ -78,7 +92,33 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--overwrite-query-builder",
         action="store_true",
-        help="Allow --save-query-builder-from to overwrite existing query builder artifacts",
+        help="Allow --save-query-builder-from or --scaffold to overwrite existing artifacts",
+    )
+    parser.add_argument(
+        "--scaffold",
+        type=str,
+        metavar="OUTPUT_DIR",
+        help="Scaffold a portable DAX workspace folder at the given path",
+    )
+    parser.add_argument(
+        "--scaffold-query",
+        type=str,
+        help="Path to an existing .dax file to include in the scaffolded workspace",
+    )
+    parser.add_argument(
+        "--scaffold-dax",
+        type=str,
+        help="Raw DAX query text to include (alternative to --scaffold-query)",
+    )
+    parser.add_argument(
+        "--scaffold-name",
+        type=str,
+        help="Name for the query file when using --scaffold-dax (default: query)",
+    )
+    parser.add_argument(
+        "--scaffold-project-name",
+        type=str,
+        help="Project name for the scaffolded pyproject.toml (default: folder name)",
     )
     parser.add_argument(
         "--inspect-connection",

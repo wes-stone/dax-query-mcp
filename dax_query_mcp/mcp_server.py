@@ -18,6 +18,7 @@ from .query_builder import (
     query_builder_to_payload,
     save_query_builder_artifacts,
 )
+from .scaffold import scaffold_workspace
 
 DEFAULT_CONNECTIONS_DIR = str(resolve_connections_dir(os.getenv("DAX_QUERY_MCP_CONNECTIONS_DIR")))
 DEFAULT_PREVIEW_ROWS = 10
@@ -383,6 +384,40 @@ def _build_query_response_markdown(*, title: str, summary: dict[str, Any]) -> st
         f"- Columns: {column_count}\n\n"
         f"{summary['markdown_table']}"
     )
+
+
+@mcp.tool()
+def scaffold_dax_workspace(
+    output_dir: str,
+    query_text: str,
+    query_name: str = "query",
+    project_name: str = "",
+    connection_name: str = "",
+    connections_dir: str = DEFAULT_CONNECTIONS_DIR,
+) -> str:
+    """Scaffold a portable DAX workspace folder with a bare-bones executor script.
+
+    Creates a standalone folder the user can share, run with `uv run`, or paste
+    into a notebook.  Contains: run_query.py, queries/<name>.dax, pyproject.toml,
+    and a README.
+
+    Use this when a user is happy with a DAX query and wants to export / port it
+    to a separate project for further analysis.
+    """
+    conn_str = ""
+    if connection_name:
+        conn = _get_connection(connection_name, connections_dir)
+        conn_str = conn.connection_string
+
+    result = scaffold_workspace(
+        output_dir,
+        query_text=query_text,
+        query_name=query_name,
+        project_name=project_name or None,
+        connection_string=conn_str,
+        overwrite=True,
+    )
+    return _to_json(result)
 
 
 def _to_json(payload: Any) -> str:

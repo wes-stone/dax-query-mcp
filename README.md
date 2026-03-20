@@ -239,6 +239,43 @@ flowchart TD
 
 This is especially useful when you want to move beyond Excel's refresh-and-wait cycle, inspect the underlying data at full fidelity, or share a reproducible query with teammates who don't use the same workbook.
 
+### Export as Portable Workspace
+
+Once you're happy with a DAX query, you can scaffold a self-contained project folder — ready to share, run with `uv run`, or paste into a notebook:
+
+```mermaid
+flowchart LR
+    A["✅ Validated\nDAX Query"] -->|scaffold| B["📁 my-project/"]
+    B --> C["run_query.py\n(bare-bones executor)"]
+    B --> D["queries/query.dax"]
+    B --> E["pyproject.toml\n(uv-ready)"]
+
+    style A fill:#217346,color:#fff
+    style B fill:#FFD43B,color:#000
+    style C fill:#4B8BBE,color:#fff
+    style D fill:#306998,color:#fff
+    style E fill:#306998,color:#fff
+```
+
+**Via MCP:**
+```
+scaffold_dax_workspace(
+    output_dir="./my-copilot-analysis",
+    query_text="EVALUATE SUMMARIZECOLUMNS(...)",
+    query_name="copilot-acr",
+    connection_name="ahr_connection"   # optional — embeds the connection string
+)
+```
+
+**Via CLI:**
+```bash
+dax-query --scaffold ./my-copilot-analysis \
+          --scaffold-query queries/copilot-acr.dax \
+          --scaffold-project-name copilot-acr-analysis
+```
+
+The generated `run_query.py` is ~40 lines of self-contained Python — no external dependencies beyond `pywin32` and `pandas`. Copy the `dax_to_pandas()` function straight into a Jupyter or Fabric notebook cell.
+
 ## Packaging
 
 Build locally with:
