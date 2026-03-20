@@ -22,12 +22,15 @@ _RUN_QUERY_TEMPLATE = textwrap.dedent("""\
 
     from __future__ import annotations
 
+    import re
     import sys
     from contextlib import suppress
     from datetime import datetime
     from pathlib import Path
 
     import pandas as pd
+
+    _ANSI_RE = re.compile(r'\\x1b\\[[0-9;]*m')
 
     # ── Connection ────────────────────────────────────────────────────────
     # Paste your Power BI / SSAS connection string here.
@@ -72,6 +75,7 @@ _RUN_QUERY_TEMPLATE = textwrap.dedent("""\
 
         data = {{}}
         for i, name in enumerate(fields):
+            name = _ANSI_RE.sub('', name)
             vals = [_strip_tz(v) for v in rows[i]] if rows and i < len(rows) else []
             data[name] = list(vals)
 
@@ -216,6 +220,7 @@ def _build_notebook(connection_string: str, query_filename: str, query_text: str
             "    max_rows: int | None = None,\n"
             ") -> pd.DataFrame:\n"
             '    """Execute a DAX query via COM/ADODB and return a pandas DataFrame."""\n'
+            "    import re\n"
             "    import win32com.client\n"
             "\n"
             '    conn = win32com.client.Dispatch("ADODB.Connection")\n'
@@ -241,14 +246,21 @@ def _build_notebook(connection_string: str, query_filename: str, query_text: str
             "                with suppress(Exception):\n"
             "                    close()\n"
             "\n"
+            "    ansi_re = re.compile(r'\\x1b\\[[0-9;]*m')\n"
             "    data = {}\n"
             "    for i, name in enumerate(fields):\n"
-            "        col = name\n"
+            "        col = ansi_re.sub('', name)\n"
             "        if '[' in col and ']' in col:\n"
             "            col = col[col.find('[') + 1 : col.find(']')]\n"
             "        col = col.replace(' ', '_')\n"
             "        vals = list(rows[i]) if rows and i < len(rows) else []\n"
-            "        data[col] = vals\n"
+            "        # Strip timezone info — COM returns broken tz that crashes pandas\n"
+            "        clean = []\n"
+            "        for v in vals:\n"
+            "            if isinstance(v, datetime) and v.tzinfo is not None:\n"
+            "                v = v.replace(tzinfo=None)\n"
+            "            clean.append(v)\n"
+            "        data[col] = clean\n"
             "\n"
             "    return pd.DataFrame(data)"
         ),
