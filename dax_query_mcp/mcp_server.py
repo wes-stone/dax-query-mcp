@@ -1,0 +1,329 @@
+from __future__ import annotations
+
+import json
+import os
+from typing import Any
+
+import pandas as pd
+from mcp.server.fastmcp import FastMCP
+
+from .connections import load_connections, resolve_connections_dir
+from .executor import dax_to_pandas
+from .query_builder import (
+    load_query_builder_artifacts,
+    query_builder_from_dict,
+    query_builder_to_payload,
+    save_query_builder_artifacts,
+)
+
+DEFAULT_CONNECTIONS_DIR = str(resolve_connections_dir(os.getenv("DAX_QUERY_MCP_CONNECTIONS_DIR")))
+DEFAULT_PREVIEW_ROWS = 10
+
+_ROWSET_COLUMNS: dict[str, list[str]] = {
+    "cubes": ["CUBE_NAME", "DESCRIPTION"],
+    "dimensions": ["CUBE_NAME", "DIMENSION_NAME", "DESCRIPTION"],
+    "hierarchies": ["CUBE_NAME", "HIERARCHY_NAME", "DESCRIPTION"],
+    "levels": ["CUBE_NAME", "LEVEL_NAME", "DESCRIPTION"],
+    "measures": ["CUBE_NAME", "MEASURE_NAME", "DESCRIPTION"],
+}
+
+mcp = FastMCP("dax-query-server")
+
+
+@mcp.tool()
+def list_connections(connections_dir: str = DEFAULT_CONNECTIONS_DIR) -> str:
+    """List the configured semantic model connections."""
+    connections = load_connections(connections_dir)
+    payload = {
+        "connections_dir": str(resolve_connections_dir(connections_dir)),
+        "connection_count": len(connections),
+        "connections": [
+            {
+                "name": connection.name,
+                "description": connection.description,
+                "has_context_markdown": connection.context_markdown is not None,
+                "context_path": connection.context_path,
+            }
+            for connection in connections.values()
+        ],
+    }
+    return _to_json(payload)
+
+
+@mcp.tool()
+def get_connection_context(
+    connection_name: str,
+    connections_dir: str = DEFAULT_CONNECTIONS_DIR,
+) -> str:
+    """Return metadata and markdown context for a named connection."""
+    connection = _get_connection(connection_name, connections_dir)
+    payload = {
+        "connection_name": connection.name,
+        "description": connection.description,
+        "context_path": connection.context_path,
+        "context_markdown": connection.context_markdown,
+    }
+    return _to_json(payload)
+
+
+@mcp.tool()
+def run_connection_query(
+    connection_name: str,
+    query: str,
+    connections_dir: str = DEFAULT_CONNECTIONS_DIR,
+    preview_rows: int = DEFAULT_PREVIEW_ROWS,
+    max_rows: int | None = None,
+) -> str:
+    """Run an ad hoc query against a named connection and return a preview."""
+    connection = _get_connection(connection_name, connections_dir)
+    dataframe = dax_to_pandas(
+        dax_query=query,
+        conn_str=connection.connection_string,
+        connection_timeout_seconds=connection.connection_timeout_seconds,
+        command_timeout_seconds=connection.command_timeout_seconds,
+        max_rows=max_rows or connection.max_rows,
+    )
+
+    payload = {
+        "connection_name": connection_name,
+        "connections_dir": str(resolve_connections_dir(connections_dir)),
+        "summary": summarize_dataframe(dataframe, preview_rows=preview_rows),
+    }
+    return _to_json(payload)
+
+
+@mcp.tool()
+def save_query_builder(
+    query_builder_json: str,
+    queries_dir: str = "queries",
+    overwrite: bool = False,
+) -> str:
+    """Save .dax and .dax.queryBuilder artifacts from a structured query builder JSON payload."""
+    definition = query_builder_from_dict(json.loads(query_builder_json))
+    payload = save_query_builder_artifacts(definition, queries_dir=queries_dir, overwrite=overwrite)
+    return _to_json(payload)
+
+
+@mcp.tool()
+def get_query_builder(
+    query_name: str,
+    queries_dir: str = "queries",
+) -> str:
+    """Load a saved query builder definition and generated DAX text by query name."""
+    definition, dax_query = load_query_builder_artifacts(query_name, queries_dir=queries_dir)
+    payload = {
+        "query_name": query_name,
+        "queries_dir": str(Path(queries_dir)),
+        "query_builder": query_builder_to_payload(definition),
+        "dax_query": dax_query,
+    }
+    return _to_json(payload)
+
+
+@mcp.tool()
+def inspect_connection(
+    connection_name: str,
+    connections_dir: str = DEFAULT_CONNECTIONS_DIR,
+    preview_rows: int = DEFAULT_PREVIEW_ROWS,
+    command_timeout_seconds: int | None = None,
+) -> str:
+    """Inspect model metadata for a named connection using non-admin MDSCHEMA rowsets."""
+    return _to_json(
+        inspect_connection_metadata(
+            connection_name=connection_name,
+            connections_dir=connections_dir,
+            preview_rows=preview_rows,
+            command_timeout_seconds=command_timeout_seconds,
+        )
+    )
+
+
+def inspect_connection_metadata(
+    connection_name: str,
+    *,
+    connections_dir: str = DEFAULT_CONNECTIONS_DIR,
+    preview_rows: int = DEFAULT_PREVIEW_ROWS,
+    command_timeout_seconds: int | None = None,
+) -> dict[str, Any]:
+    """Return connection metadata as a Python payload for CLI and MCP callers."""
+    connection = _get_connection(connection_name, connections_dir)
+    effective_timeout = (
+        connection.command_timeout_seconds if command_timeout_seconds is None else command_timeout_seconds
+    )
+    rowsets = {
+        "cubes": "SELECT * FROM $SYSTEM.MDSCHEMA_CUBES",
+        "dimensions": "SELECT * FROM $SYSTEM.MDSCHEMA_DIMENSIONS",
+        "hierarchies": "SELECT * FROM $SYSTEM.MDSCHEMA_HIERARCHIES",
+        "levels": "SELECT * FROM $SYSTEM.MDSCHEMA_LEVELS",
+        "measures": "SELECT * FROM $SYSTEM.MDSCHEMA_MEASURES",
+    }
+    results: dict[str, Any] = {"connection_name": connection_name}
+
+    for name, rowset_query in rowsets.items():
+        try:
+            dataframe = dax_to_pandas(
+                dax_query=rowset_query,
+                conn_str=connection.connection_string,
+                connection_timeout_seconds=connection.connection_timeout_seconds,
+                command_timeout_seconds=effective_timeout,
+            )
+            results[name] = summarize_rowset(
+                dataframe,
+                preview_rows=preview_rows,
+                preferred_columns=_ROWSET_COLUMNS[name],
+            )
+        except Exception as exc:
+            results[name] = {"error": str(exc)}
+
+    return results
+
+
+@mcp.tool()
+def list_queries(config_dir: str = "queries") -> str:
+    """Backward-compatible helper for the older query-centric workflow."""
+    from .pipeline import DAXPipeline
+
+    pipeline = DAXPipeline(config_dir=config_dir)
+    payload = {
+        "config_dir": config_dir,
+        "query_count": len(pipeline.queries),
+        "queries": [
+            {
+                "name": config.name,
+                "description": config.description,
+                "output_filename": config.output_filename,
+            }
+            for config in pipeline.queries.values()
+        ],
+    }
+    return _to_json(payload)
+
+
+@mcp.tool()
+def run_named_query(
+    query_name: str,
+    config_dir: str = "queries",
+    preview_rows: int = DEFAULT_PREVIEW_ROWS,
+) -> str:
+    """Backward-compatible helper for the older query-centric workflow."""
+    from .pipeline import DAXPipeline
+
+    pipeline = DAXPipeline(config_dir=config_dir)
+    dataframe = pipeline.run_query(query_name, preview=False, export=False)
+    if dataframe is None:
+        raise ValueError(f"Query '{query_name}' could not be executed from config_dir='{config_dir}'.")
+
+    payload = {
+        "query_name": query_name,
+        "config_dir": config_dir,
+        "summary": summarize_dataframe(dataframe, preview_rows=preview_rows),
+    }
+    return _to_json(payload)
+
+
+@mcp.tool()
+def run_ad_hoc_query(
+    connection_string: str,
+    query: str,
+    preview_rows: int = DEFAULT_PREVIEW_ROWS,
+    command_timeout_seconds: int = 1800,
+    max_rows: int | None = None,
+) -> str:
+    """Run an ad hoc DAX or rowset query against a semantic model connection."""
+    dataframe = dax_to_pandas(
+        dax_query=query,
+        conn_str=connection_string,
+        command_timeout_seconds=command_timeout_seconds,
+        max_rows=max_rows,
+    )
+    payload = {
+        "summary": summarize_dataframe(dataframe, preview_rows=preview_rows),
+    }
+    return _to_json(payload)
+
+
+@mcp.tool()
+def inspect_model_metadata(
+    connection_string: str,
+    preview_rows: int = DEFAULT_PREVIEW_ROWS,
+    command_timeout_seconds: int = 300,
+) -> str:
+    """Backward-compatible metadata probe for raw connection strings."""
+    rowsets = {
+        "cubes": "SELECT * FROM $SYSTEM.MDSCHEMA_CUBES",
+        "dimensions": "SELECT * FROM $SYSTEM.MDSCHEMA_DIMENSIONS",
+        "hierarchies": "SELECT * FROM $SYSTEM.MDSCHEMA_HIERARCHIES",
+        "levels": "SELECT * FROM $SYSTEM.MDSCHEMA_LEVELS",
+        "measures": "SELECT * FROM $SYSTEM.MDSCHEMA_MEASURES",
+    }
+    results: dict[str, Any] = {}
+
+    for name, rowset_query in rowsets.items():
+        try:
+            dataframe = dax_to_pandas(
+                dax_query=rowset_query,
+                conn_str=connection_string,
+                command_timeout_seconds=command_timeout_seconds,
+            )
+            results[name] = summarize_rowset(
+                dataframe,
+                preview_rows=preview_rows,
+                preferred_columns=_ROWSET_COLUMNS[name],
+            )
+        except Exception as exc:
+            results[name] = {"error": str(exc)}
+
+    return _to_json(results)
+
+
+def summarize_dataframe(dataframe: pd.DataFrame, *, preview_rows: int) -> dict[str, Any]:
+    preview_count = max(1, preview_rows)
+    return {
+        "row_count": int(len(dataframe)),
+        "column_count": int(len(dataframe.columns)),
+        "columns": [str(column) for column in dataframe.columns],
+        "preview": _preview_records(dataframe, preview_count),
+    }
+
+
+def summarize_rowset(
+    dataframe: pd.DataFrame,
+    *,
+    preview_rows: int,
+    preferred_columns: list[str],
+) -> dict[str, Any]:
+    present_columns = [column for column in preferred_columns if column in dataframe.columns]
+    preview_frame = dataframe[present_columns] if present_columns else dataframe
+    return {
+        "row_count": int(len(dataframe)),
+        "columns": [str(column) for column in dataframe.columns],
+        "preview": _preview_records(preview_frame, max(1, preview_rows)),
+    }
+
+
+def _preview_records(dataframe: pd.DataFrame, preview_rows: int) -> list[dict[str, Any]]:
+    preview_json = dataframe.head(preview_rows).to_json(orient="records", date_format="iso")
+    return json.loads(preview_json)
+
+
+def _to_json(payload: Any) -> str:
+    return json.dumps(payload, indent=2, default=str)
+
+
+def _get_connection(connection_name: str, connections_dir: str) -> Any:
+    connections = load_connections(connections_dir)
+    connection = connections.get(connection_name)
+    if connection is None:
+        raise ValueError(
+            f"Connection '{connection_name}' was not found in '{resolve_connections_dir(connections_dir)}'."
+        )
+    return connection
+
+
+def main() -> None:
+    mcp.run(transport="stdio")
+
+
+if __name__ == "__main__":
+    main()
+

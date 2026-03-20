@@ -1,0 +1,215 @@
+from __future__ import annotations
+
+from contextlib import suppress
+from datetime import datetime
+from typing import Callable
+
+import pandas as pd
+from loguru import logger
+
+from .exceptions import DAXExecutionError
+from .models import DAXQueryConfig
+
+DispatchFn = Callable[[str], object]
+MSOLAP_INSTALL_URL = (
+    "https://learn.microsoft.com/en-us/analysis-services/client-libraries?view=sql-analysis-services-2025"
+)
+
+_SENSITIVE_CONNECTION_KEYS = {
+    "password",
+    "pwd",
+    "token",
+    "access token",
+    "client secret",
+    "secret",
+    "user id",
+    "uid",
+}
+
+
+def dax_to_pandas(
+    dax_query: str,
+    conn_str: str,
+    *,
+    connection_timeout_seconds: int = 300,
+    command_timeout_seconds: int = 1800,
+    max_rows: int | None = None,
+) -> pd.DataFrame:
+    """Execute an ad hoc DAX query and return a DataFrame."""
+    config = DAXQueryConfig(
+        name="adhoc_query",
+        connection_string=conn_str,
+        dax_query=dax_query,
+        connection_timeout_seconds=connection_timeout_seconds,
+        command_timeout_seconds=command_timeout_seconds,
+        max_rows=max_rows,
+    )
+    return DAXExecutor().execute(config)
+
+
+def redact_connection_string(connection_string: str) -> str:
+    redacted_parts: list[str] = []
+    for raw_part in connection_string.split(";"):
+        part = raw_part.strip()
+        if not part:
+            continue
+        if "=" not in part:
+            redacted_parts.append(part)
+            continue
+
+        key, value = part.split("=", 1)
+        if key.strip().lower() in _SENSITIVE_CONNECTION_KEYS:
+            redacted_parts.append(f"{key}=***")
+        else:
+            redacted_parts.append(f"{key}={value}")
+    return ";".join(redacted_parts)
+
+
+class DAXExecutor:
+    """Reusable ADODB-backed DAX executor."""
+
+    def __init__(self, dispatcher: DispatchFn | None = None):
+        self._dispatcher = dispatcher or _default_dispatcher()
+
+    def execute(self, query: DAXQueryConfig) -> pd.DataFrame:
+        conn = None
+        cmd = None
+        recordset = None
+
+        try:
+            logger.debug(
+                "Opening ADODB connection for query '{}' using {}",
+                query.name,
+                redact_connection_string(query.connection_string),
+            )
+            conn = self._dispatcher("ADODB.Connection")
+            conn.ConnectionTimeout = query.connection_timeout_seconds
+            conn.CommandTimeout = query.command_timeout_seconds
+            conn.Open(query.connection_string)
+
+            cmd = self._dispatcher("ADODB.Command")
+            cmd.ActiveConnection = conn
+            cmd.CommandText = query.dax_query
+            cmd.CommandTimeout = query.command_timeout_seconds
+
+            logger.debug(
+                "Executing query '{}' (command timeout={}s, max_rows={})",
+                query.name,
+                query.command_timeout_seconds,
+                query.max_rows,
+            )
+            recordset = cmd.Execute()[0]
+            dataframe = _recordset_to_dataframe(recordset, max_rows=query.max_rows)
+            logger.debug("Query '{}' returned shape {}", query.name, dataframe.shape)
+            return dataframe
+        except Exception as exc:
+            raise DAXExecutionError(_format_execution_error(query.name, exc)) from exc
+        finally:
+            _release_command(cmd)
+            _safe_close(recordset)
+            _safe_close(conn)
+
+
+def _default_dispatcher() -> DispatchFn:
+    try:
+        import win32com.client
+    except ImportError as exc:
+        raise DAXExecutionError(
+            "pywin32 is required to execute DAX queries. Install the project dependencies on Windows. "
+            f"If ADODB/MSOLAP errors continue, install the Analysis Services client libraries: {MSOLAP_INSTALL_URL}"
+        ) from exc
+
+    return win32com.client.Dispatch
+
+
+def _recordset_to_dataframe(recordset: object, *, max_rows: int | None) -> pd.DataFrame:
+    fields = getattr(recordset, "Fields")
+    columns = [field.Name for field in fields]
+    raw_rows = recordset.GetRows(max_rows) if max_rows is not None else recordset.GetRows()
+
+    processed_columns: dict[str, list[object]] = {}
+    for index, column_name in enumerate(columns):
+        values = []
+        if raw_rows and index < len(raw_rows):
+            values = [_strip_timezone(value) for value in raw_rows[index]]
+        processed_columns[column_name] = list(values)
+
+    dataframe = pd.DataFrame(processed_columns)
+    return _normalize_dataframe(dataframe)
+
+
+def _normalize_dataframe(dataframe: pd.DataFrame) -> pd.DataFrame:
+    dataframe = dataframe.copy()
+    dataframe.columns = [_normalize_column_name(column_name) for column_name in dataframe.columns]
+
+    for column_name in dataframe.select_dtypes(include=["object"]).columns:
+        non_null = dataframe[column_name].dropna()
+        if non_null.empty:
+            continue
+
+        first_valid = non_null.iloc[0]
+        if _is_timezone_aware(first_valid):
+            dataframe[column_name] = dataframe[column_name].apply(_strip_timezone)
+            dataframe[column_name] = pd.to_datetime(dataframe[column_name])
+            continue
+
+        numeric_values = pd.to_numeric(non_null, errors="coerce")
+        if numeric_values.notna().all():
+            dataframe[column_name] = pd.to_numeric(dataframe[column_name], errors="coerce")
+
+    return dataframe
+
+
+def _normalize_column_name(column_name: str) -> str:
+    if "[" in column_name and "]" in column_name:
+        column_name = column_name[column_name.find("[") + 1 : column_name.find("]")]
+    return column_name.replace(" ", "_")
+
+
+def _is_timezone_aware(value: object) -> bool:
+    return hasattr(value, "tzinfo") and getattr(value, "tzinfo") is not None
+
+
+def _strip_timezone(value: object) -> object:
+    if isinstance(value, datetime) and value.tzinfo is not None:
+        return value.replace(tzinfo=None)
+    return value
+
+
+def _safe_close(obj: object | None) -> None:
+    if obj is None:
+        return
+    close_method = getattr(obj, "Close", None)
+    if callable(close_method):
+        with suppress(Exception):
+            close_method()
+
+
+def _release_command(cmd: object | None) -> None:
+    if cmd is None:
+        return
+    with suppress(Exception):
+        cmd.ActiveConnection = None
+
+
+def _format_execution_error(query_name: str, exc: Exception) -> str:
+    base_message = f"Failed to execute query '{query_name}': {exc}"
+    if _looks_like_missing_msolap(exc):
+        return (
+            f"{base_message} Possible issue: the MSOLAP / Analysis Services client libraries may not be "
+            f"installed on this machine. Install them here: {MSOLAP_INSTALL_URL}"
+        )
+    return base_message
+
+
+def _looks_like_missing_msolap(exc: Exception) -> bool:
+    message = str(exc).lower()
+    match_terms = [
+        "msolap",
+        "provider is not registered",
+        "class not registered",
+        "provider cannot be found",
+        "cannot be found. it may not be properly installed",
+    ]
+    return any(term in message for term in match_terms)
+

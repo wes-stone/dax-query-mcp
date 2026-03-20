@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dax-query-mcp"
+version = "0.1.0"
+description = "Windows-first DAX and MCP toolkit for Power BI semantic models"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "loguru>=0.7.3",
+    "mcp>=1.2.0",
+    "pandas>=2.3.0",
+    "pywin32>=310",
+    "pyyaml>=6.0.2",
+]
+
+[project.scripts]
+dax-query = "dax_query_mcp.cli:main"
+dax-query-server = "dax_query_mcp.mcp_server:main"
+dax-query-guard = "dax_query_mcp.copilot_guard:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.4.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.setuptools.packages.find]
+include = ["dax_query_mcp*"]
+

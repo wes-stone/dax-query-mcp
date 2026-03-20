@@ -1,0 +1,21 @@
+# Sample DAX Pipeline Configuration
+connection_string: |
+  Provider=MSOLAP.8;
+  Data Source=powerbi://api.powerbi.com/v1.0/myorg/YourWorkspace?readonly;
+  Initial Catalog=YourDataset
+
+dax_query: |
+  EVALUATE
+  SUMMARIZECOLUMNS(
+      'Calendar'[Fiscal Month],
+      'Account Information'[TPID],
+      "Revenue", [Total Revenue]
+  )
+  ORDER BY 'Calendar'[Fiscal Month] ASC
+
+description: "Monthly revenue by account"
+output_filename: "monthly_revenue"
+# Optional safety controls
+# connection_timeout_seconds: 300
+# command_timeout_seconds: 1800
+# max_rows: 50000

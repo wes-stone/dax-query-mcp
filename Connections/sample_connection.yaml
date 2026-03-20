@@ -1,0 +1,7 @@
+connection_string: |
+  Provider=MSOLAP.8;
+  Data Source=powerbi://api.powerbi.com/v1.0/myorg/SampleWorkspace?readonly;
+  Initial Catalog=SampleSemanticModel
+
+description: "Sample semantic model connection"
+command_timeout_seconds: 1800

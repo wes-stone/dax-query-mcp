@@ -1,0 +1,16 @@
+.venv/
+.pytest_cache/
+*.egg-info/
+__pycache__/
+*.pyc
+build/
+dist/
+export/
+queries/*.yaml
+Connections/*.yaml
+Connections/*.yml
+Connections/*.md
+!Connections/sample_connection.yaml
+!Connections/sample_connection.md
+!queries/sample_query.yaml
+.copilot-guard.local.json
