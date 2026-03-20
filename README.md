@@ -8,76 +8,88 @@ It supports:
 - a first-class query-builder save flow for `.dax` + `.dax.queryBuilder`
 - a connection-centric MCP server for AI clients
 - optional markdown context files per connection
+- scaffolding portable Python workspaces from validated DAX queries
 
-## Requirements
+---
 
-- Windows
-- `MSOLAP` / Analysis Services client libraries installed
-- Python 3.12+
-- `uv`
+<!-- LLM-INSTRUCTIONS-START
+These instructions are for AI assistants (Copilot, Claude, etc.) using this MCP server.
 
-If the provider is missing, runtime errors will point users to the Microsoft client library install page.
+## Workflow
 
-## Install
+1. Call `list_connections` to discover available connections.
+2. If a connection has `has_context_markdown=true`, call `get_connection_context`
+   to read its curated column/measure/filter docs BEFORE writing any DAX.
+3. Write DAX queries using `run_connection_query` or `run_connection_query_markdown`.
+4. After showing results, always render the "What would you like to do next?" list
+   from `response_markdown` EXACTLY as-is — do NOT summarize or omit it.
+
+## Rules
+
+- NEVER use `INFO.*()` or `$SYSTEM.DISCOVER_*` queries — they require admin
+  privileges and will fail for most users. Use `get_connection_context` instead.
+- Safe metadata queries use `$SYSTEM.MDSCHEMA_*` rowsets (used by `inspect_connection`).
+- Before calling `save_query_builder` or `scaffold_dax_workspace`, you MUST ask
+  the user where to save. Both tools will error if you pick a path yourself.
+- Before calling `save_query_builder`, call `get_query_builder_schema` first to
+  see the required JSON payload shape.
+
+LLM-INSTRUCTIONS-END -->
+
+## Quick start
+
+### 1. Install
 
 ```bash
 uv sync
 ```
 
-Optional sanity check:
+Sanity check:
 
 ```bash
 uv run dax-query --help
 ```
 
-## Connection-centric MCP setup
+### 2. Add your connection
 
-Store semantic model connections in `Connections\`.
-
-```text
-Connections/
-├── sample_connection.yaml
-└── sample_connection.md
-```
+Create a YAML file in `Connections/` with your Power BI connection string:
 
 ```yaml
-# Connections/sample_connection.yaml
+# Connections/my_model.yaml
 connection_string: |
   Provider=MSOLAP.8;
-  Data Source=powerbi://api.powerbi.com/v1.0/myorg/SampleWorkspace?readonly;
-  Initial Catalog=SampleSemanticModel
+  Data Source=powerbi://api.powerbi.com/v1.0/myorg/MyWorkspace?readonly;
+  Initial Catalog=MySemanticModel
 
-description: "Sample semantic model connection"
-# Optional MCP workflow hint
-# suggested_skill: "enrollment-skills"
-# suggested_skill_reason: "Use this when you want help drafting KQL against canonical enrollment data."
+description: "My semantic model"
 command_timeout_seconds: 1800
 ```
 
-```md
-# Connections/sample_connection.md
+Optionally add a markdown context file alongside it. This is how you teach the
+LLM about your model's tables, columns, measures, and business logic — without
+needing admin privileges on the server:
 
-Document important tables, measures, naming conventions, and business context here.
+```md
+<!-- Connections/my_model.md -->
+# My Semantic Model
+
+## Key tables
+- `Calendar` — Fiscal Month, Fiscal Year, Relative Year
+- `Account` — Top Parent, TPID, Account Name
+
+## Key measures
+- [Azure Consumed Revenue] — total ACR
+- [Avg Daily Azure Consumed Revenue] — daily average
+
+## Common filters
+- 'ACR Adjustment Type'[ACR Adjustment Type Group] = "N/A + Other"
+- 'Azure Anomaly Flag'[ACR Anomaly Flag] = "With Anomaly Adjustments"
 ```
 
-### MCP tools
+### 3. Wire up MCP in your workspace
 
-- `list_connections`
-- `get_connection_context`
-- `run_connection_query`
-- `run_connection_query_markdown`
-- `inspect_connection`
-- `get_query_builder_schema`
-- `save_query_builder`
-- `get_query_builder`
-
-The bundled `sample_connection` scaffold stays in the repo for reference, but it is hidden from normal MCP connection listings so only your real connections show up.
-
-If a connection YAML includes `suggested_skill` and `suggested_skill_reason`, both `list_connections` and `get_connection_context` will surface that hint so an MCP client can steer the user toward the right workflow.
-
-The query and metadata MCP tools also return a `presentation_hint` plus a `markdown_table` preview so Copilot-style clients can default to rendering result previews as markdown tables.
-
-### Local MCP config example
+Add the server to your workspace `.copilot/mcp.json` so Copilot (or any MCP
+client) discovers it automatically:
 
 ```json
 {
@@ -88,18 +100,72 @@ The query and metadata MCP tools also return a `presentation_hint` plus a `markd
         "--refresh-package",
         "dax-query-mcp",
         "--from",
-        "C:\\absolute\\path\\to\\dax-query-mcp",
+        "C:\\path\\to\\dax-query-mcp",
         "dax-query-server"
       ],
       "env": {
-        "DAX_QUERY_MCP_CONNECTIONS_DIR": "C:\\absolute\\path\\to\\dax-query-mcp\\Connections"
+        "DAX_QUERY_MCP_CONNECTIONS_DIR": "C:\\path\\to\\dax-query-mcp\\Connections"
       }
     }
   }
 }
 ```
 
-Using `--refresh-package dax-query-mcp` is recommended for local-path MCP development so `uvx` does not keep serving a stale cached tool environment after you add or rename tools.
+> **Tip:** Set `DAX_QUERY_MCP_CONNECTIONS_DIR` to the absolute path of your
+> `Connections/` folder. This lets you keep connections in one place and reference
+> them from any workspace.
+
+Using `--refresh-package dax-query-mcp` is recommended for local-path MCP
+development so `uvx` does not keep serving a stale cached tool environment after
+you add or rename tools.
+
+## Requirements
+
+- Windows (COM/ADODB used for DAX execution)
+- `MSOLAP` / Analysis Services client libraries installed
+- Python 3.12+
+- `uv`
+
+If the provider is missing, runtime errors will point to the Microsoft client library install page.
+
+## MCP tools
+
+| Tool | Purpose |
+|------|---------|
+| `list_connections` | Discover available connections |
+| `get_connection_context` | Read curated markdown context (tables, columns, measures) — **use this instead of admin queries** |
+| `run_connection_query` | Execute a DAX query, get structured JSON + markdown preview |
+| `run_connection_query_markdown` | Execute a DAX query, get markdown-only response |
+| `inspect_connection` | Live schema discovery via safe `$SYSTEM.MDSCHEMA_*` rowsets |
+| `get_query_builder_schema` | Get the JSON shape needed for `save_query_builder` |
+| `save_query_builder` | Save `.dax` + `.dax.queryBuilder` artifacts |
+| `get_query_builder` | Load a previously saved query builder definition |
+| `scaffold_dax_workspace` | Export a portable Python project from a validated DAX query |
+
+> **Admin queries are blocked.** `INFO.HIERARCHIES()`, `INFO.MEASURES()`, and
+> `$SYSTEM.DISCOVER_*` require server admin rights and will fail for most users.
+> Use `get_connection_context` for metadata discovery.
+
+### Connection YAML options
+
+```yaml
+connection_string: "..."       # required — MSOLAP connection string
+description: "..."             # human-readable label
+command_timeout_seconds: 1800  # DAX query timeout
+connection_timeout_seconds: 300 # connection open timeout
+max_rows: null                 # global row cap (null = unlimited)
+# Optional MCP workflow hints:
+# suggested_skill: "enrollment-skills"
+# suggested_skill_reason: "Use for KQL against canonical enrollment data."
+```
+
+If a connection YAML includes `suggested_skill` and `suggested_skill_reason`,
+both `list_connections` and `get_connection_context` will surface that hint so an
+MCP client can steer the user toward the right workflow.
+
+The query and metadata MCP tools also return a `presentation_hint` plus a
+`markdown_table` preview so Copilot-style clients can render result previews
+as markdown tables.
 
 ## CLI usage
 
