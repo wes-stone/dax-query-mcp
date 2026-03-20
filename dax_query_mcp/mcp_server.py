@@ -171,26 +171,28 @@ def get_query_builder_schema(connection_name: str = "your_connection") -> str:
 @mcp.tool()
 def save_query_builder(
     query_builder_json: str,
-    queries_dir: str = "queries",
+    queries_dir: str = "",
     overwrite: bool = False,
 ) -> str:
     """Save .dax and .dax.queryBuilder artifacts from a structured query builder JSON payload.
 
-    IMPORTANT workflow:
-    1. Call get_query_builder_schema FIRST to see the required JSON shape.
-    2. Ask the user where they want to save (use their path as queries_dir).
-    3. Build the JSON payload with ALL required fields:
+    STOP — before calling this tool you MUST:
+    1. Ask the user: "Where should I save the query files?" and wait for their answer.
+    2. Call get_query_builder_schema to see the required JSON shape.
+    3. Use the user's answer as queries_dir. If queries_dir is empty this tool will error.
+
+    The JSON payload requires these fields:
        - "name": a slug for the query (e.g. "copilot_acr")
        - "connection_name": the connection to use
        - "columns": list of column expressions like "'Calendar'[Fiscal Month]"
        - "measures": list of {caption, expression} objects
        - "filters": list of filter definitions
        - "order_by": list of sort definitions
-    4. Pass the complete JSON string as query_builder_json.
-
-    Do NOT invent parameter names — the only params are query_builder_json,
-    queries_dir, and overwrite.
     """
+    if not queries_dir.strip():
+        raise ValueError(
+            "queries_dir is required — ask the user where to save before calling this tool."
+        )
     try:
         definition = query_builder_from_dict(json.loads(query_builder_json))
     except ValueError as exc:
@@ -457,8 +459,8 @@ def _build_query_response_markdown(*, title: str, summary: dict[str, Any]) -> st
         f"1. Filter / refine — narrow to a specific account, TPID, or time range\n"
         f"2. Aggregate — total by month, by account, etc.\n"
         f"3. Export as CSV — save results to a CSV file\n"
-        f"4. Save to DAX Studio — save as a .dax query builder file\n"
-        f"5. Scaffold Python workspace — export to a standalone Python project with uv run support and Jupyter notebook\n"
+        f"4. Save to DAX Studio — save as a .dax query builder file (I will ask you where to save)\n"
+        f"5. Scaffold Python workspace — export to a standalone Python project (I will ask you where to save)\n"
     )
 
 
@@ -473,12 +475,11 @@ def scaffold_dax_workspace(
 ) -> str:
     """Scaffold a portable DAX workspace folder with a bare-bones executor script.
 
-    Creates a standalone folder the user can share, run with `uv run`, or paste
-    into a notebook.  Contains: run_query.py, queries/<name>.dax, pyproject.toml,
-    and a README.
+    Creates: run_query.py, notebook.ipynb, queries/<name>.dax, pyproject.toml, README.
 
-    IMPORTANT: Always ask the user where they want to save the workspace before
-    calling this tool. Do NOT pick a directory on their behalf.
+    STOP — before calling this tool you MUST:
+    1. Ask the user: "Where should I save the Python workspace?" and wait for their answer.
+    2. Use their answer as output_dir. Do NOT invent a path.
 
     After scaffolding, explain to the user:
     1. What files were created and what each one does

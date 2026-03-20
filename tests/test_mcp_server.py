@@ -144,7 +144,10 @@ def test_query_builder_schema_and_error_guidance() -> None:
     assert "example_connection" in schema_payload["example_json"]
 
     try:
-        save_query_builder('{"name":"bad","connection_name":"example_connection","columns":[""]}')
+        save_query_builder(
+            '{"name":"bad","connection_name":"example_connection","columns":[""]}',
+            queries_dir="test_queries",
+        )
     except ValueError as exc:
         assert "get_query_builder_schema" in str(exc)
     else:
