@@ -19,6 +19,7 @@ from .query_builder import (
 
 DEFAULT_CONNECTIONS_DIR = str(resolve_connections_dir(os.getenv("DAX_QUERY_MCP_CONNECTIONS_DIR")))
 DEFAULT_PREVIEW_ROWS = 10
+_MARKDOWN_PRESENTATION_HINT = "When presenting these results to the user, render preview data as a markdown table."
 
 _ROWSET_COLUMNS: dict[str, list[str]] = {
     "cubes": ["CUBE_NAME", "DESCRIPTION"],
@@ -79,7 +80,7 @@ def run_connection_query(
     preview_rows: int = DEFAULT_PREVIEW_ROWS,
     max_rows: int | None = None,
 ) -> str:
-    """Run an ad hoc query against a named connection and return a preview."""
+    """Run an ad hoc query against a named connection and return a preview. Present preview data as a markdown table."""
     connection = _get_connection(connection_name, connections_dir)
     dataframe = dax_to_pandas(
         dax_query=query,
@@ -92,6 +93,7 @@ def run_connection_query(
     payload = {
         "connection_name": connection_name,
         "connections_dir": str(resolve_connections_dir(connections_dir)),
+        "presentation_hint": _MARKDOWN_PRESENTATION_HINT,
         "summary": summarize_dataframe(dataframe, preview_rows=preview_rows),
     }
     return _to_json(payload)
@@ -132,7 +134,7 @@ def inspect_connection(
     preview_rows: int = DEFAULT_PREVIEW_ROWS,
     command_timeout_seconds: int | None = None,
 ) -> str:
-    """Inspect model metadata for a named connection using non-admin MDSCHEMA rowsets."""
+    """Inspect model metadata for a named connection using non-admin MDSCHEMA rowsets. Present previews as markdown tables."""
     return _to_json(
         inspect_connection_metadata(
             connection_name=connection_name,
@@ -162,7 +164,10 @@ def inspect_connection_metadata(
         "levels": "SELECT * FROM $SYSTEM.MDSCHEMA_LEVELS",
         "measures": "SELECT * FROM $SYSTEM.MDSCHEMA_MEASURES",
     }
-    results: dict[str, Any] = {"connection_name": connection_name}
+    results: dict[str, Any] = {
+        "connection_name": connection_name,
+        "presentation_hint": _MARKDOWN_PRESENTATION_HINT,
+    }
 
     for name, rowset_query in rowsets.items():
         try:
@@ -210,7 +215,7 @@ def run_named_query(
     config_dir: str = "queries",
     preview_rows: int = DEFAULT_PREVIEW_ROWS,
 ) -> str:
-    """Backward-compatible helper for the older query-centric workflow."""
+    """Backward-compatible helper for the older query-centric workflow. Present preview data as a markdown table."""
     from .pipeline import DAXPipeline
 
     pipeline = DAXPipeline(config_dir=config_dir)
@@ -221,6 +226,7 @@ def run_named_query(
     payload = {
         "query_name": query_name,
         "config_dir": config_dir,
+        "presentation_hint": _MARKDOWN_PRESENTATION_HINT,
         "summary": summarize_dataframe(dataframe, preview_rows=preview_rows),
     }
     return _to_json(payload)
@@ -234,7 +240,7 @@ def run_ad_hoc_query(
     command_timeout_seconds: int = 1800,
     max_rows: int | None = None,
 ) -> str:
-    """Run an ad hoc DAX or rowset query against a semantic model connection."""
+    """Run an ad hoc DAX or rowset query against a semantic model connection. Present preview data as a markdown table."""
     dataframe = dax_to_pandas(
         dax_query=query,
         conn_str=connection_string,
@@ -242,6 +248,7 @@ def run_ad_hoc_query(
         max_rows=max_rows,
     )
     payload = {
+        "presentation_hint": _MARKDOWN_PRESENTATION_HINT,
         "summary": summarize_dataframe(dataframe, preview_rows=preview_rows),
     }
     return _to_json(payload)
@@ -253,7 +260,7 @@ def inspect_model_metadata(
     preview_rows: int = DEFAULT_PREVIEW_ROWS,
     command_timeout_seconds: int = 300,
 ) -> str:
-    """Backward-compatible metadata probe for raw connection strings."""
+    """Backward-compatible metadata probe for raw connection strings. Present previews as markdown tables."""
     rowsets = {
         "cubes": "SELECT * FROM $SYSTEM.MDSCHEMA_CUBES",
         "dimensions": "SELECT * FROM $SYSTEM.MDSCHEMA_DIMENSIONS",
@@ -261,7 +268,7 @@ def inspect_model_metadata(
         "levels": "SELECT * FROM $SYSTEM.MDSCHEMA_LEVELS",
         "measures": "SELECT * FROM $SYSTEM.MDSCHEMA_MEASURES",
     }
-    results: dict[str, Any] = {}
+    results: dict[str, Any] = {"presentation_hint": _MARKDOWN_PRESENTATION_HINT}
 
     for name, rowset_query in rowsets.items():
         try:
@@ -289,6 +296,7 @@ def summarize_dataframe(dataframe: pd.DataFrame, *, preview_rows: int) -> dict[s
         "columns": [str(column) for column in dataframe.columns],
         "preview": preview_records(dataframe, preview_count),
         "markdown_table": dataframe_to_markdown(dataframe, max_rows=preview_count),
+        "presentation_hint": _MARKDOWN_PRESENTATION_HINT,
     }
 
 
@@ -305,6 +313,7 @@ def summarize_rowset(
         "columns": [str(column) for column in dataframe.columns],
         "preview": preview_records(preview_frame, max(1, preview_rows)),
         "markdown_table": dataframe_to_markdown(preview_frame, max_rows=max(1, preview_rows)),
+        "presentation_hint": _MARKDOWN_PRESENTATION_HINT,
     }
 
 

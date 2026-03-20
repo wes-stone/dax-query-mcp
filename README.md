@@ -73,6 +73,8 @@ The bundled `sample_connection` scaffold stays in the repo for reference, but it
 
 If a connection YAML includes `suggested_skill` and `suggested_skill_reason`, both `list_connections` and `get_connection_context` will surface that hint so an MCP client can steer the user toward the right workflow.
 
+The query and metadata MCP tools also return a `presentation_hint` plus a `markdown_table` preview so Copilot-style clients can default to rendering result previews as markdown tables.
+
 ### Local MCP config example
 
 ```json

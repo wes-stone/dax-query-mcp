@@ -2,7 +2,13 @@ import json
 
 import pandas as pd
 
-from dax_query_mcp.mcp_server import get_connection_context, list_connections, summarize_dataframe, summarize_rowset
+from dax_query_mcp.mcp_server import (
+    get_connection_context,
+    inspect_model_metadata,
+    list_connections,
+    summarize_dataframe,
+    summarize_rowset,
+)
 
 
 def test_summarize_dataframe_returns_preview_and_columns() -> None:
@@ -20,6 +26,7 @@ def test_summarize_dataframe_returns_preview_and_columns() -> None:
     assert summary["columns"] == ["When", "Value"]
     assert summary["preview"] == [{"When": "2026-03-01T00:00:00.000", "Value": 1}]
     assert "| When | Value |" in summary["markdown_table"]
+    assert "markdown table" in summary["presentation_hint"]
 
 
 def test_summarize_rowset_prefers_display_columns() -> None:
@@ -48,6 +55,7 @@ def test_summarize_rowset_prefers_display_columns() -> None:
         }
     ]
     assert "| CUBE_NAME | DIMENSION_NAME | DESCRIPTION |" in summary["markdown_table"]
+    assert "markdown table" in summary["presentation_hint"]
 
 
 def test_connection_context_includes_suggested_skill(tmp_path) -> None:
@@ -73,4 +81,16 @@ suggested_skill_reason: "Use this when you want help building KQL from this mode
     assert context_payload["suggested_skill"] == "enrollment-skills"
     assert "KQL" in context_payload["suggested_skill_reason"]
     assert listing_payload["connections"][0]["suggested_skill"] == "enrollment-skills"
+
+
+def test_inspect_model_metadata_includes_presentation_hint(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "dax_query_mcp.mcp_server.dax_to_pandas",
+        lambda **kwargs: pd.DataFrame({"CUBE_NAME": ["Model"], "DESCRIPTION": ["Sample"]}),
+    )
+
+    payload = json.loads(inspect_model_metadata("Provider=MSOLAP.8;Data Source=localhost;Initial Catalog=Model"))
+
+    assert "markdown table" in payload["presentation_hint"]
+    assert "markdown table" in payload["cubes"]["presentation_hint"]
 
