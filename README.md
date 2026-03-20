@@ -259,10 +259,10 @@ The query builder workflow lets you go from a natural-language prompt or existin
 
 ```mermaid
 flowchart LR
-    A["🗣️ Natural Language\nor DAX Query"] -->|MCP / CLI / Copilot| B["⚙️ Generate\n& Validate"]
-    B -->|save_query_builder| C["💾 .dax +\n.queryBuilder"]
-    C -->|double-click or\nFile → Open| D["📊 DAX Studio\nQuery Builder"]
-    D -->|edit / profile / run| E["✅ Results"]
+    A["Natural Language\nor DAX Query"] -->|MCP / CLI / Copilot| B["Generate\nand Validate"]
+    B -->|save_query_builder| C[".dax +\n.queryBuilder"]
+    C -->|double-click or\nFile - Open| D["DAX Studio\nQuery Builder"]
+    D -->|edit / profile / run| E["Results"]
 
     style A fill:#4B8BBE,color:#fff
     style B fill:#306998,color:#fff
@@ -283,11 +283,11 @@ If you already have an Excel PivotTable connected to a Power BI semantic model, 
 
 ```mermaid
 flowchart TD
-    A["📊 Excel PivotTable\n(connected to semantic model)"] --> B["📋 Copy Layout\nRows · Columns · Values · Filters"]
-    B --> C["💬 Paste into Copilot\n'My pivot has Fiscal Month on rows,\nTop Parent on rows, ACR as value,\nfiltered to CY + GitHub Copilot'"]
-    C --> D["⚙️ Auto-Generate DAX\nSUMMARIZECOLUMNS +\nKEEPFILTERS / TREATAS"]
-    D --> E["💾 save_query_builder\n.dax + .queryBuilder"]
-    E --> F["📊 Open in DAX Studio\nQuery Builder tab"]
+    A["Excel PivotTable"] --> B["Copy Layout\nRows - Columns - Values - Filters"]
+    B --> C["Paste into Copilot"]
+    C --> D["Auto-Generate DAX\nSUMMARIZECOLUMNS +\nKEEPFILTERS / TREATAS"]
+    D --> E["save_query_builder\n.dax + .queryBuilder"]
+    E --> F["Open in DAX Studio\nQuery Builder tab"]
 
     style A fill:#217346,color:#fff
     style B fill:#217346,color:#fff
@@ -311,10 +311,10 @@ Once you're happy with a DAX query, you can scaffold a self-contained project fo
 
 ```mermaid
 flowchart LR
-    A["✅ Validated\nDAX Query"] -->|scaffold| B["📁 my-project/"]
-    B --> C["run_query.py\n(bare-bones executor)"]
+    A["Validated\nDAX Query"] -->|scaffold| B["my-project/"]
+    B --> C["run_query.py"]
     B --> D["queries/query.dax"]
-    B --> E["pyproject.toml\n(uv-ready)"]
+    B --> E["pyproject.toml"]
 
     style A fill:#217346,color:#fff
     style B fill:#FFD43B,color:#000
