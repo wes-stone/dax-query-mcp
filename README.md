@@ -191,6 +191,20 @@ You can open the generated `.dax` file directly in **DAX Studio**. The accompany
 
 The query builder workflow lets you go from a natural-language prompt or existing DAX query all the way to an interactive DAX Studio session:
 
+```mermaid
+flowchart LR
+    A["🗣️ Natural Language\nor DAX Query"] -->|MCP / CLI / Copilot| B["⚙️ Generate\n& Validate"]
+    B -->|save_query_builder| C["💾 .dax +\n.queryBuilder"]
+    C -->|double-click or\nFile → Open| D["📊 DAX Studio\nQuery Builder"]
+    D -->|edit / profile / run| E["✅ Results"]
+
+    style A fill:#4B8BBE,color:#fff
+    style B fill:#306998,color:#fff
+    style C fill:#FFD43B,color:#000
+    style D fill:#2B579A,color:#fff
+    style E fill:#217346,color:#fff
+```
+
 1. **Write or generate a query** — use the MCP `run_connection_query` tool, the CLI, or ask Copilot to build a DAX query for you.
 2. **Save as a query-builder artifact** — call `save_query_builder` (MCP) or `dax-query-builder --save-query-builder-from` (CLI) to persist the query as a `.dax` + `.dax.queryBuilder` pair.
 3. **Open in DAX Studio** — double-click the `.dax` file or use *File → Open* in DAX Studio. The query loads into DAX Studio's Query Builder tab with columns, measures, and filters pre-populated.
@@ -200,6 +214,22 @@ This means you can iterate on queries inside Copilot, save them, and immediately
 ### Excel Pivot → DAX (power use case)
 
 If you already have an Excel PivotTable connected to a Power BI semantic model, you can convert it to a portable DAX query:
+
+```mermaid
+flowchart TD
+    A["📊 Excel PivotTable\n(connected to semantic model)"] --> B["📋 Copy Layout\nRows · Columns · Values · Filters"]
+    B --> C["💬 Paste into Copilot\n'My pivot has Fiscal Month on rows,\nTop Parent on rows, ACR as value,\nfiltered to CY + GitHub Copilot'"]
+    C --> D["⚙️ Auto-Generate DAX\nSUMMARIZECOLUMNS +\nKEEPFILTERS / TREATAS"]
+    D --> E["💾 save_query_builder\n.dax + .queryBuilder"]
+    E --> F["📊 Open in DAX Studio\nQuery Builder tab"]
+
+    style A fill:#217346,color:#fff
+    style B fill:#217346,color:#fff
+    style C fill:#4B8BBE,color:#fff
+    style D fill:#306998,color:#fff
+    style E fill:#FFD43B,color:#000
+    style F fill:#2B579A,color:#fff
+```
 
 1. **Copy your pivot layout** — note the fields on Rows/Columns, the measures in Values, and any active slicer/filter selections.
 2. **Paste into Copilot** — describe (or paste) the field names, measures, and filter values. For example:
