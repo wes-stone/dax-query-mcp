@@ -201,6 +201,7 @@ def _build_notebook(connection_string: str, query_filename: str, query_text: str
             "from __future__ import annotations\n"
             "from contextlib import suppress\n"
             "from datetime import datetime\n"
+            "from pathlib import Path\n"
             "import pandas as pd"
         ),
         _md_cell("## Connection String\n\nPaste your Power BI / SSAS connection string here."),
@@ -253,8 +254,11 @@ def _build_notebook(connection_string: str, query_filename: str, query_text: str
         ),
         _md_cell(f"## Run Query\n\nLoaded from `queries/{query_filename}`"),
         _code_cell(
-            f'DAX_QUERY = """\n{query_text}\n""".strip()\n'
-            "\n"
+            f'DAX_FILE = Path("queries/{query_filename}")\n'
+            "DAX_QUERY = DAX_FILE.read_text(encoding=\"utf-8\").strip()\n"
+            "print(f\"Loaded {len(DAX_QUERY)} chars from {DAX_FILE}\")"
+        ),
+        _code_cell(
             "df = dax_to_pandas(DAX_QUERY, CONNECTION_STRING)\n"
             "print(f\"{len(df)} rows x {len(df.columns)} cols\")\n"
             "df.head(20)"

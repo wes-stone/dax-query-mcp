@@ -152,9 +152,20 @@ def save_query_builder(
 ) -> str:
     """Save .dax and .dax.queryBuilder artifacts from a structured query builder JSON payload.
 
-    IMPORTANT: Always ask the user where they want to save the query files before
-    calling this tool. Do NOT pick a directory on their behalf. Use their answer
-    as the queries_dir parameter.
+    IMPORTANT workflow:
+    1. Call get_query_builder_schema FIRST to see the required JSON shape.
+    2. Ask the user where they want to save (use their path as queries_dir).
+    3. Build the JSON payload with ALL required fields:
+       - "name": a slug for the query (e.g. "copilot_acr")
+       - "connection_name": the connection to use
+       - "columns": list of column expressions like "'Calendar'[Fiscal Month]"
+       - "measures": list of {caption, expression} objects
+       - "filters": list of filter definitions
+       - "order_by": list of sort definitions
+    4. Pass the complete JSON string as query_builder_json.
+
+    Do NOT invent parameter names — the only params are query_builder_json,
+    queries_dir, and overwrite.
     """
     try:
         definition = query_builder_from_dict(json.loads(query_builder_json))
@@ -405,13 +416,13 @@ def _build_query_response_markdown(*, title: str, summary: dict[str, Any]) -> st
         f"- Rows: {summary['row_count']}\n"
         f"- Columns: {column_count}\n\n"
         f"{summary['markdown_table']}\n\n"
-        f"---\n"
+        f"---\n\n"
         f"**What would you like to do next?**\n\n"
-        f"1. 🔍 **Filter / refine** — narrow to a specific account, TPID, or time range\n"
-        f"2. 📊 **Aggregate** — total by month, by account, etc.\n"
-        f"3. 📋 **Export as CSV** — save results to a CSV file\n"
-        f"4. 🛠️ **Save to DAX Studio** — save as a `.dax` query builder file you can open in DAX Studio\n"
-        f"5. 📦 **Scaffold Python workspace** — export to a standalone Python project with `uv run` support\n"
+        f"1. Filter / refine — narrow to a specific account, TPID, or time range\n"
+        f"2. Aggregate — total by month, by account, etc.\n"
+        f"3. Export as CSV — save results to a CSV file\n"
+        f"4. Save to DAX Studio — save as a .dax query builder file\n"
+        f"5. Scaffold Python workspace — export to a standalone Python project with uv run support and Jupyter notebook\n"
     )
 
 

@@ -127,7 +127,8 @@ def test_scaffold_notebook_is_valid_ipynb(tmp_path: Path) -> None:
         "".join(c["source"]) for c in nb["cells"] if c["cell_type"] == "code"
     )
     assert "dax_to_pandas" in all_source
-    assert "EVALUATE ROW('hello', 42)" in all_source
+    assert 'queries/test.dax' in all_source
+    assert "read_text" in all_source
     assert "Provider=MSOLAP" in all_source
 
 
