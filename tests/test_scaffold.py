@@ -19,12 +19,13 @@ def test_scaffold_creates_all_files(tmp_path: Path) -> None:
     )
     assert output.exists()
     assert (output / "run_query.py").exists()
+    assert (output / "notebook.ipynb").exists()
     assert (output / "pyproject.toml").exists()
     assert (output / "README.md").exists()
     assert (output / "queries" / "test-query.dax").exists()
     assert result["project_name"] == "my-project"
     assert result["query_filename"] == "test-query.dax"
-    assert len(result["files_created"]) == 4
+    assert len(result["files_created"]) == 5
 
 
 def test_scaffold_from_file(tmp_path: Path) -> None:
@@ -105,6 +106,36 @@ def test_scaffold_appends_dax_extension(tmp_path: Path) -> None:
     output = tmp_path / "proj"
     result = scaffold_workspace(output, query_text="EVALUATE ROW('x', 1)", query_name="my-query")
     assert result["query_filename"] == "my-query.dax"
+
+
+def test_scaffold_notebook_is_valid_ipynb(tmp_path: Path) -> None:
+    """Generated notebook must be valid JSON with expected ipynb structure."""
+    output = tmp_path / "nb-test"
+    scaffold_workspace(
+        output,
+        query_text="EVALUATE ROW('hello', 42)",
+        query_name="test",
+        connection_string="Provider=MSOLAP;Data Source=localhost",
+    )
+    nb_path = output / "notebook.ipynb"
+    assert nb_path.exists()
+    nb = json.loads(nb_path.read_text(encoding="utf-8"))
+    assert nb["nbformat"] == 4
+    assert len(nb["cells"]) >= 5
+    # Check the query text is in a code cell
+    all_source = " ".join(
+        "".join(c["source"]) for c in nb["cells"] if c["cell_type"] == "code"
+    )
+    assert "dax_to_pandas" in all_source
+    assert "EVALUATE ROW('hello', 42)" in all_source
+    assert "Provider=MSOLAP" in all_source
+
+
+def test_scaffold_pyproject_has_ipykernel(tmp_path: Path) -> None:
+    output = tmp_path / "kern"
+    scaffold_workspace(output, query_text="EVALUATE ROW('x', 1)")
+    toml = (output / "pyproject.toml").read_text(encoding="utf-8")
+    assert "ipykernel" in toml
 
 
 def test_scaffold_multiline_connection_string_produces_valid_python(tmp_path: Path) -> None:
