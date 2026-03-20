@@ -4,8 +4,12 @@ import pandas as pd
 
 from dax_query_mcp.mcp_server import (
     get_connection_context,
+    get_query_builder_schema,
     inspect_model_metadata,
     list_connections,
+    run_connection_query,
+    run_connection_query_markdown,
+    save_query_builder,
     summarize_dataframe,
     summarize_rowset,
 )
@@ -24,7 +28,7 @@ def test_summarize_dataframe_returns_preview_and_columns() -> None:
     assert summary["row_count"] == 2
     assert summary["column_count"] == 2
     assert summary["columns"] == ["When", "Value"]
-    assert summary["preview"] == [{"When": "2026-03-01T00:00:00.000", "Value": 1}]
+    assert summary["preview"] == [{"When": "Mar-01-2026", "Value": 1}]
     assert "| When | Value |" in summary["markdown_table"]
     assert "markdown table" in summary["presentation_hint"]
 
@@ -93,4 +97,56 @@ def test_inspect_model_metadata_includes_presentation_hint(monkeypatch) -> None:
 
     assert "markdown table" in payload["presentation_hint"]
     assert "markdown table" in payload["cubes"]["presentation_hint"]
+
+
+def test_run_connection_query_returns_ready_markdown(monkeypatch, tmp_path) -> None:
+    connections_dir = tmp_path / "Connections"
+    connections_dir.mkdir()
+    (connections_dir / "sales.yaml").write_text(
+        """
+connection_string: |
+  Provider=MSOLAP.8;
+  Data Source=powerbi://api.powerbi.com/v1.0/myorg/SampleWorkspace?readonly;
+  Initial Catalog=SampleSemanticModel
+description: "Sales model"
+""".strip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "dax_query_mcp.mcp_server.dax_to_pandas",
+        lambda **kwargs: pd.DataFrame({"Month": ["2026-01"], "Revenue": [42]}),
+    )
+
+    payload = json.loads(
+        run_connection_query(
+            connection_name="sales",
+            query="EVALUATE ROW(\"Revenue\", 42)",
+            connections_dir=str(connections_dir),
+            preview_rows=5,
+        )
+    )
+    markdown_only = run_connection_query_markdown(
+        connection_name="sales",
+        query="EVALUATE ROW(\"Revenue\", 42)",
+        connections_dir=str(connections_dir),
+        preview_rows=5,
+    )
+
+    assert "| Month | Revenue |" in payload["markdown_table"]
+    assert "| Month | Revenue |" in payload["response_markdown"]
+    assert markdown_only.startswith("### Query preview for `sales`")
+
+
+def test_query_builder_schema_and_error_guidance() -> None:
+    schema_payload = json.loads(get_query_builder_schema("example_connection"))
+
+    assert schema_payload["example_payload"]["connection_name"] == "example_connection"
+    assert "example_connection" in schema_payload["example_json"]
+
+    try:
+        save_query_builder('{"name":"bad","connection_name":"example_connection","columns":[""]}')
+    except ValueError as exc:
+        assert "get_query_builder_schema" in str(exc)
+    else:
+        raise AssertionError("Expected save_query_builder to raise on invalid payload")
 

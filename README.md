@@ -65,7 +65,9 @@ Document important tables, measures, naming conventions, and business context he
 - `list_connections`
 - `get_connection_context`
 - `run_connection_query`
+- `run_connection_query_markdown`
 - `inspect_connection`
+- `get_query_builder_schema`
 - `save_query_builder`
 - `get_query_builder`
 
@@ -83,6 +85,8 @@ The query and metadata MCP tools also return a `presentation_hint` plus a `markd
     "dax-query-server": {
       "command": "uvx",
       "args": [
+        "--refresh-package",
+        "dax-query-mcp",
         "--from",
         "C:\\absolute\\path\\to\\dax-query-mcp",
         "dax-query-server"
@@ -94,6 +98,8 @@ The query and metadata MCP tools also return a `presentation_hint` plus a `markd
   }
 }
 ```
+
+Using `--refresh-package dax-query-mcp` is recommended for local-path MCP development so `uvx` does not keep serving a stale cached tool environment after you add or rename tools.
 
 ## CLI usage
 
@@ -180,6 +186,28 @@ uv run dax-query-builder --save-query-builder-from builder.json --config-dir que
 Saved query-builder artifacts are also loaded by the normal query loader, so they can be listed and run like other saved queries as long as the referenced `connection_name` exists in `Connections\`.
 
 You can open the generated `.dax` file directly in **DAX Studio**. The accompanying `.dax.queryBuilder` file is kept by `dax-query-mcp` as structured builder metadata.
+
+### Query → Generate → Open in DAX Studio
+
+The query builder workflow lets you go from a natural-language prompt or existing DAX query all the way to an interactive DAX Studio session:
+
+1. **Write or generate a query** — use the MCP `run_connection_query` tool, the CLI, or ask Copilot to build a DAX query for you.
+2. **Save as a query-builder artifact** — call `save_query_builder` (MCP) or `dax-query-builder --save-query-builder-from` (CLI) to persist the query as a `.dax` + `.dax.queryBuilder` pair.
+3. **Open in DAX Studio** — double-click the `.dax` file or use *File → Open* in DAX Studio. The query loads into DAX Studio's Query Builder tab with columns, measures, and filters pre-populated.
+
+This means you can iterate on queries inside Copilot, save them, and immediately switch to DAX Studio for visual editing, profiling, or execution against your semantic model.
+
+### Excel Pivot → DAX (power use case)
+
+If you already have an Excel PivotTable connected to a Power BI semantic model, you can convert it to a portable DAX query:
+
+1. **Copy your pivot layout** — note the fields on Rows/Columns, the measures in Values, and any active slicer/filter selections.
+2. **Paste into Copilot** — describe (or paste) the field names, measures, and filter values. For example:
+   > "My pivot has Fiscal Month on rows, Top Parent on rows, Azure Consumed Revenue as the value, filtered to Relative Year = CY and Strategic Pillar = GitHub Copilot."
+3. **Generate the DAX** — Copilot (via the MCP tools) produces a `SUMMARIZECOLUMNS` query with `KEEPFILTERS`/`TREATAS` filters matching your pivot selections.
+4. **Save and open in DAX Studio** — use `save_query_builder` to get a `.dax` file you can open directly in DAX Studio's Query Builder for further tweaking.
+
+This is especially useful when you want to move beyond Excel's refresh-and-wait cycle, inspect the underlying data at full fidelity, or share a reproducible query with teammates who don't use the same workbook.
 
 ## Packaging
 

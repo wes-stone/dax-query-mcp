@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
@@ -9,10 +10,11 @@ from mcp.server.fastmcp import FastMCP
 
 from .connections import load_connections, resolve_connections_dir
 from .executor import dax_to_pandas
-from .formatting import dataframe_to_markdown, preview_records
+from .formatting import DEFAULT_DATE_FORMAT, dataframe_to_markdown, preview_records
 from .query_builder import (
     load_query_builder_artifacts,
     query_builder_from_dict,
+    query_builder_schema_payload,
     query_builder_to_payload,
     save_query_builder_artifacts,
 )
@@ -80,7 +82,7 @@ def run_connection_query(
     preview_rows: int = DEFAULT_PREVIEW_ROWS,
     max_rows: int | None = None,
 ) -> str:
-    """Run an ad hoc query against a named connection and return a preview. Present preview data as a markdown table."""
+    """Run an ad hoc query against a named connection and return a preview. Use response_markdown when answering users."""
     connection = _get_connection(connection_name, connections_dir)
     dataframe = dax_to_pandas(
         dax_query=query,
@@ -90,13 +92,46 @@ def run_connection_query(
         max_rows=max_rows or connection.max_rows,
     )
 
+    summary = summarize_dataframe(dataframe, preview_rows=preview_rows)
     payload = {
         "connection_name": connection_name,
         "connections_dir": str(resolve_connections_dir(connections_dir)),
         "presentation_hint": _MARKDOWN_PRESENTATION_HINT,
-        "summary": summarize_dataframe(dataframe, preview_rows=preview_rows),
+        "markdown_table": summary["markdown_table"],
+        "response_markdown": _build_query_response_markdown(
+            title=f"Query preview for `{connection_name}`",
+            summary=summary,
+        ),
+        "summary": summary,
     }
     return _to_json(payload)
+
+
+@mcp.tool()
+def run_connection_query_markdown(
+    connection_name: str,
+    query: str,
+    connections_dir: str = DEFAULT_CONNECTIONS_DIR,
+    preview_rows: int = DEFAULT_PREVIEW_ROWS,
+    max_rows: int | None = None,
+) -> str:
+    """Run an ad hoc query against a named connection and return a ready-to-present markdown preview table."""
+    payload = json.loads(
+        run_connection_query(
+            connection_name=connection_name,
+            query=query,
+            connections_dir=connections_dir,
+            preview_rows=preview_rows,
+            max_rows=max_rows,
+        )
+    )
+    return str(payload["response_markdown"])
+
+
+@mcp.tool()
+def get_query_builder_schema(connection_name: str = "your_connection") -> str:
+    """Return the expected JSON shape and a copyable example payload for save_query_builder."""
+    return _to_json(query_builder_schema_payload(connection_name=connection_name))
 
 
 @mcp.tool()
@@ -106,7 +141,12 @@ def save_query_builder(
     overwrite: bool = False,
 ) -> str:
     """Save .dax and .dax.queryBuilder artifacts from a structured query builder JSON payload."""
-    definition = query_builder_from_dict(json.loads(query_builder_json))
+    try:
+        definition = query_builder_from_dict(json.loads(query_builder_json))
+    except ValueError as exc:
+        raise ValueError(
+            f"{exc}. Call get_query_builder_schema first for a valid payload template."
+        ) from exc
     payload = save_query_builder_artifacts(definition, queries_dir=queries_dir, overwrite=overwrite)
     return _to_json(payload)
 
@@ -215,7 +255,7 @@ def run_named_query(
     config_dir: str = "queries",
     preview_rows: int = DEFAULT_PREVIEW_ROWS,
 ) -> str:
-    """Backward-compatible helper for the older query-centric workflow. Present preview data as a markdown table."""
+    """Backward-compatible helper for the older query-centric workflow. Use response_markdown when answering users."""
     from .pipeline import DAXPipeline
 
     pipeline = DAXPipeline(config_dir=config_dir)
@@ -223,11 +263,17 @@ def run_named_query(
     if dataframe is None:
         raise ValueError(f"Query '{query_name}' could not be executed from config_dir='{config_dir}'.")
 
+    summary = summarize_dataframe(dataframe, preview_rows=preview_rows)
     payload = {
         "query_name": query_name,
         "config_dir": config_dir,
         "presentation_hint": _MARKDOWN_PRESENTATION_HINT,
-        "summary": summarize_dataframe(dataframe, preview_rows=preview_rows),
+        "markdown_table": summary["markdown_table"],
+        "response_markdown": _build_query_response_markdown(
+            title=f"Query preview for `{query_name}`",
+            summary=summary,
+        ),
+        "summary": summary,
     }
     return _to_json(payload)
 
@@ -240,16 +286,22 @@ def run_ad_hoc_query(
     command_timeout_seconds: int = 1800,
     max_rows: int | None = None,
 ) -> str:
-    """Run an ad hoc DAX or rowset query against a semantic model connection. Present preview data as a markdown table."""
+    """Run an ad hoc DAX or rowset query against a semantic model connection. Use response_markdown when answering users."""
     dataframe = dax_to_pandas(
         dax_query=query,
         conn_str=connection_string,
         command_timeout_seconds=command_timeout_seconds,
         max_rows=max_rows,
     )
+    summary = summarize_dataframe(dataframe, preview_rows=preview_rows)
     payload = {
         "presentation_hint": _MARKDOWN_PRESENTATION_HINT,
-        "summary": summarize_dataframe(dataframe, preview_rows=preview_rows),
+        "markdown_table": summary["markdown_table"],
+        "response_markdown": _build_query_response_markdown(
+            title="Query preview",
+            summary=summary,
+        ),
+        "summary": summary,
     }
     return _to_json(payload)
 
@@ -288,14 +340,19 @@ def inspect_model_metadata(
     return _to_json(results)
 
 
-def summarize_dataframe(dataframe: pd.DataFrame, *, preview_rows: int) -> dict[str, Any]:
+def summarize_dataframe(
+    dataframe: pd.DataFrame,
+    *,
+    preview_rows: int,
+    date_format: str = DEFAULT_DATE_FORMAT,
+) -> dict[str, Any]:
     preview_count = max(1, preview_rows)
     return {
         "row_count": int(len(dataframe)),
         "column_count": int(len(dataframe.columns)),
         "columns": [str(column) for column in dataframe.columns],
-        "preview": preview_records(dataframe, preview_count),
-        "markdown_table": dataframe_to_markdown(dataframe, max_rows=preview_count),
+        "preview": preview_records(dataframe, preview_count, date_format=date_format),
+        "markdown_table": dataframe_to_markdown(dataframe, max_rows=preview_count, date_format=date_format),
         "presentation_hint": _MARKDOWN_PRESENTATION_HINT,
     }
 
@@ -305,16 +362,27 @@ def summarize_rowset(
     *,
     preview_rows: int,
     preferred_columns: list[str],
+    date_format: str = DEFAULT_DATE_FORMAT,
 ) -> dict[str, Any]:
     present_columns = [column for column in preferred_columns if column in dataframe.columns]
     preview_frame = dataframe[present_columns] if present_columns else dataframe
     return {
         "row_count": int(len(dataframe)),
         "columns": [str(column) for column in dataframe.columns],
-        "preview": preview_records(preview_frame, max(1, preview_rows)),
-        "markdown_table": dataframe_to_markdown(preview_frame, max_rows=max(1, preview_rows)),
+        "preview": preview_records(preview_frame, max(1, preview_rows), date_format=date_format),
+        "markdown_table": dataframe_to_markdown(preview_frame, max_rows=max(1, preview_rows), date_format=date_format),
         "presentation_hint": _MARKDOWN_PRESENTATION_HINT,
     }
+
+
+def _build_query_response_markdown(*, title: str, summary: dict[str, Any]) -> str:
+    column_count = summary.get("column_count", len(summary.get("columns", [])))
+    return (
+        f"### {title}\n\n"
+        f"- Rows: {summary['row_count']}\n"
+        f"- Columns: {column_count}\n\n"
+        f"{summary['markdown_table']}"
+    )
 
 
 def _to_json(payload: Any) -> str:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -9,6 +10,27 @@ from typing import Any
 QUERY_BUILDER_SUFFIX = ".dax.queryBuilder"
 QUERY_FILE_SUFFIX = ".dax"
 QUERY_BUILDER_VERSION = 1
+_TABLE_COLUMN_PATTERN = re.compile(r"^'(?P<table>.+)'\[(?P<name>.+)\]$")
+_MEASURE_PATTERN = re.compile(r"^\[(?P<name>.+)\]$")
+SUPPORTED_FILTER_OPERATORS = (
+    "=",
+    "==",
+    "!=",
+    "<>",
+    ">",
+    ">=",
+    "<",
+    "<=",
+    "is",
+    "is_not",
+    "in",
+    "not_in",
+    "between",
+    "contains",
+    "starts_with",
+    "is_blank",
+    "is_not_blank",
+)
 
 
 @dataclass(slots=True, frozen=True)
@@ -112,6 +134,90 @@ def query_builder_to_payload(definition: QueryBuilderDefinition) -> dict[str, An
     }
 
 
+def query_builder_schema_payload(connection_name: str = "your_connection") -> dict[str, Any]:
+    example_payload = {
+        "name": "monthly_revenue",
+        "connection_name": connection_name,
+        "description": "Monthly revenue by top parent",
+        "columns": [
+            "'Calendar'[Fiscal Month]",
+            "'Account Information'[Top Parent]",
+        ],
+        "measures": [
+            {
+                "caption": "Revenue",
+                "expression": "[Total Revenue]",
+            }
+        ],
+        "filters": [
+            {
+                "expression": "'Calendar'[Fiscal Year]",
+                "operator": "=",
+                "value": 2026,
+            }
+        ],
+        "order_by": [
+            {
+                "expression": "'Calendar'[Fiscal Month]",
+                "direction": "ASC",
+            }
+        ],
+        "command_timeout_seconds": 1800,
+        "max_rows": 5000,
+        "version": QUERY_BUILDER_VERSION,
+    }
+    return {
+        "required_fields": {
+            "name": "Non-empty string query name",
+            "connection_name": "Non-empty string matching a configured connection",
+        },
+        "notes": [
+            "Include at least one item in columns or measures.",
+            "columns must be an array of non-empty strings.",
+            "measures must be objects with caption and expression strings.",
+            "filters must be objects with expression and operator; some operators require value, values, or value2.",
+            "order_by items must be objects with expression and direction (ASC or DESC).",
+        ],
+        "supported_filter_operators": list(SUPPORTED_FILTER_OPERATORS),
+        "example_payload": example_payload,
+        "example_json": json.dumps(example_payload, indent=2),
+    }
+
+
+def query_builder_to_dax_studio_payload(definition: QueryBuilderDefinition) -> dict[str, Any]:
+    default_table = _default_table_name(definition)
+    sort_lookup = {item.expression: item.direction for item in definition.order_by}
+
+    columns = [
+        _build_dax_studio_column_payload(
+            expression=expression,
+            sort_direction=sort_lookup.get(expression, "None"),
+        )
+        for expression in definition.columns
+    ]
+    columns.extend(
+        _build_dax_studio_measure_payload(
+            measure=measure,
+            default_table=default_table,
+            sort_direction=sort_lookup.get(measure.expression, "None"),
+        )
+        for measure in definition.measures
+    )
+
+    filters = [
+        _build_dax_studio_filter_payload(filter_item, default_table=default_table)
+        for filter_item in definition.filters
+    ]
+
+    return {
+        "AutoGenerate": False,
+        "Columns": columns,
+        "Filters": {
+            "Items": filters,
+        },
+    }
+
+
 def build_query_builder_dax(definition: QueryBuilderDefinition) -> str:
     arguments: list[str] = []
     arguments.extend(definition.columns)
@@ -155,7 +261,9 @@ def save_query_builder_artifacts(
                 raise FileExistsError(f"Refusing to overwrite existing file: {path}")
 
     dax_path.write_text(build_query_builder_dax(definition), encoding="utf-8")
-    builder_path.write_text(json.dumps(query_builder_to_payload(definition), indent=2), encoding="utf-8")
+    saved_payload = query_builder_to_payload(definition)
+    saved_payload.update(query_builder_to_dax_studio_payload(definition))
+    builder_path.write_text(json.dumps(saved_payload, indent=2), encoding="utf-8")
 
     return {
         "query_name": definition.name,
@@ -219,7 +327,7 @@ def _filter_from_dict(payload: Any) -> QueryBuilderFilter:
         raise ValueError(f"Filter '{expression}' requires a non-empty 'values' array")
     if operator == "between" and (value is None or value2 is None):
         raise ValueError(f"Filter '{expression}' requires both 'value' and 'value2'")
-    if operator not in {"=", "==", "!=", "<>", ">", ">=", "<", "<=", "is", "is_not", "in", "not_in", "between", "contains", "starts_with", "is_blank", "is_not_blank"}:
+    if operator not in SUPPORTED_FILTER_OPERATORS:
         raise ValueError(f"Unsupported filter operator: {operator}")
 
     return QueryBuilderFilter(
@@ -289,6 +397,205 @@ def _format_literal(value: Any) -> str:
 
 def _format_set_literal(values: tuple[Any, ...]) -> str:
     return "{ " + ", ".join(_format_literal(value) for value in values) + " }"
+
+
+def _build_dax_studio_column_payload(*, expression: str, sort_direction: str) -> dict[str, Any]:
+    reference = _parse_reference(expression)
+    if reference["object_type"] != "Column":
+        raise ValueError(f"Unsupported query builder column expression for DAX Studio export: {expression}")
+
+    return {
+        "TabularObject": _build_tabular_object_stub(
+            caption=reference["name"],
+            dax_name=expression,
+            table_name=reference["table_name"],
+            object_type="Column",
+            metadata_image="Column",
+        ),
+        "SelectedTable": _build_table_stub(reference["table_name"]),
+        "IsModelItem": True,
+        "Caption": reference["name"],
+        "IsOverriden": False,
+        "MeasureExpression": "",
+        "SortDirection": _normalize_sort_direction(sort_direction),
+    }
+
+
+def _build_dax_studio_measure_payload(
+    *,
+    measure: QueryBuilderMeasure,
+    default_table: str,
+    sort_direction: str,
+) -> dict[str, Any]:
+    reference = _parse_reference(measure.expression)
+    table_name = reference["table_name"] or default_table
+    return {
+        "TabularObject": _build_tabular_object_stub(
+            caption=measure.caption,
+            dax_name=f"[{measure.caption}]",
+            table_name=table_name,
+            object_type="Measure",
+            metadata_image="Measure",
+            measure_expression=measure.expression,
+        ),
+        "SelectedTable": _build_table_stub(table_name),
+        "IsModelItem": False,
+        "Caption": measure.caption,
+        "IsOverriden": True,
+        "MeasureExpression": measure.expression,
+        "SortDirection": _normalize_sort_direction(sort_direction),
+    }
+
+
+def _build_dax_studio_filter_payload(filter_item: QueryBuilderFilter, *, default_table: str) -> dict[str, Any]:
+    reference = _parse_reference(filter_item.expression)
+    table_name = reference["table_name"] or default_table
+    return {
+        "TabularObject": _build_tabular_object_stub(
+            caption=reference["name"],
+            dax_name=filter_item.expression,
+            table_name=table_name,
+            object_type=reference["object_type"],
+            metadata_image="Measure" if reference["object_type"] == "Measure" else "Column",
+        ),
+        "ModelCapabilities": {
+            "Variables": True,
+            "TableConstructor": True,
+            "DAXFunctions": {
+                "SummarizeColumns": True,
+                "SubstituteWithIndex": False,
+                "TreatAs": True,
+            },
+        },
+        "FilterType": _map_filter_type(filter_item.operator),
+        "FilterValue": _format_filter_value(filter_item),
+        "FilterValueIsParameter": False,
+        "FilterValue2": _format_filter_value2(filter_item),
+        "FilterValue2IsParameter": False,
+    }
+
+
+def _build_tabular_object_stub(
+    *,
+    caption: str,
+    dax_name: str,
+    table_name: str | None,
+    object_type: str,
+    metadata_image: str,
+    measure_expression: str = "",
+) -> dict[str, Any]:
+    # DataType uses the integer form of Microsoft.AnalysisServices.Tabular.DataType
+    # so DAX Studio's QueryBuilderColumnDataTypeConverter takes the non-string branch.
+    # 2 = String (safe default when actual type is unknown).
+    return {
+        "Caption": caption,
+        "DaxName": dax_name,
+        "Description": "",
+        "IsVisible": True,
+        "ObjectType": object_type,
+        "MetadataImage": metadata_image,
+        "MeasureExpression": measure_expression,
+        "TableName": table_name,
+        "DataType": 2,
+        "SystemType": "System.String, mscorlib",
+        "ImageResource": "",
+    }
+
+
+def _build_table_stub(table_name: str) -> dict[str, Any]:
+    dax_name = table_name if table_name.startswith("'") else f"'{table_name}'"
+    clean_name = table_name.strip("'")
+    return {
+        "Caption": clean_name,
+        "DaxName": dax_name,
+        "Name": clean_name,
+        "Description": "",
+        "IsVisible": True,
+        "ObjectType": "Table",
+    }
+
+
+def _default_table_name(definition: QueryBuilderDefinition) -> str:
+    for expression in definition.columns:
+        reference = _parse_reference(expression)
+        if reference["table_name"]:
+            return reference["table_name"]
+    return "QueryBuilder"
+
+
+def _parse_reference(expression: str) -> dict[str, str | None]:
+    column_match = _TABLE_COLUMN_PATTERN.match(expression)
+    if column_match:
+        return {
+            "object_type": "Column",
+            "table_name": column_match.group("table"),
+            "name": column_match.group("name"),
+        }
+
+    measure_match = _MEASURE_PATTERN.match(expression)
+    if measure_match:
+        return {
+            "object_type": "Measure",
+            "table_name": None,
+            "name": measure_match.group("name"),
+        }
+
+    return {
+        "object_type": "Measure",
+        "table_name": None,
+        "name": expression,
+    }
+
+
+def _normalize_sort_direction(direction: str) -> str:
+    normalized = direction.upper()
+    if normalized in {"ASC", "DESC", "NONE"}:
+        return "None" if normalized == "NONE" else normalized
+    return "None"
+
+
+def _map_filter_type(operator: str) -> str:
+    return {
+        "=": "Is",
+        "==": "Is",
+        "is": "Is",
+        "!=": "IsNot",
+        "<>": "IsNot",
+        "is_not": "IsNot",
+        ">": "GreaterThan",
+        ">=": "GreaterThanOrEqual",
+        "<": "LessThan",
+        "<=": "LessThanOrEqual",
+        "in": "In",
+        "not_in": "NotIn",
+        "between": "Between",
+        "contains": "Contains",
+        "starts_with": "StartsWith",
+        "is_blank": "IsBlank",
+        "is_not_blank": "IsNotBlank",
+    }[operator]
+
+
+def _format_filter_value(filter_item: QueryBuilderFilter) -> str:
+    if filter_item.operator in {"in", "not_in"}:
+        return "\n".join(_stringify_filter_scalar(value) for value in filter_item.values)
+    if filter_item.operator in {"is_blank", "is_not_blank"}:
+        return ""
+    return _stringify_filter_scalar(filter_item.value)
+
+
+def _format_filter_value2(filter_item: QueryBuilderFilter) -> str:
+    if filter_item.operator != "between":
+        return ""
+    return _stringify_filter_scalar(filter_item.value2)
+
+
+def _stringify_filter_scalar(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "TRUE" if value else "FALSE"
+    return str(value)
 
 
 def _indent_arguments(arguments: list[str]) -> str:

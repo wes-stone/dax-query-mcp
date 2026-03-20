@@ -5,14 +5,36 @@ from typing import Any
 
 import pandas as pd
 
+DEFAULT_DATE_FORMAT = "%b-%d-%Y"
 
-def preview_records(dataframe: pd.DataFrame, preview_rows: int) -> list[dict[str, Any]]:
-    preview_json = dataframe.head(preview_rows).to_json(orient="records", date_format="iso")
+
+def _format_dates(dataframe: pd.DataFrame, date_format: str) -> pd.DataFrame:
+    """Return a copy with datetime columns rendered as formatted strings."""
+    df = dataframe.copy()
+    for col in df.columns:
+        if pd.api.types.is_datetime64_any_dtype(df[col]):
+            df[col] = df[col].dt.strftime(date_format)
+    return df
+
+
+def preview_records(
+    dataframe: pd.DataFrame,
+    preview_rows: int,
+    *,
+    date_format: str = DEFAULT_DATE_FORMAT,
+) -> list[dict[str, Any]]:
+    df = _format_dates(dataframe.head(preview_rows), date_format)
+    preview_json = df.to_json(orient="records", date_format="iso")
     return json.loads(preview_json)
 
 
-def dataframe_to_markdown(dataframe: pd.DataFrame, *, max_rows: int) -> str:
-    preview = preview_records(dataframe, max_rows)
+def dataframe_to_markdown(
+    dataframe: pd.DataFrame,
+    *,
+    max_rows: int,
+    date_format: str = DEFAULT_DATE_FORMAT,
+) -> str:
+    preview = preview_records(dataframe, max_rows, date_format=date_format)
     columns = [str(column) for column in dataframe.columns]
     if not columns:
         return "_No columns_"

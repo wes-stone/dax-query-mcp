@@ -7,6 +7,8 @@ build/
 dist/
 export/
 queries/*.yaml
+queries/*.dax
+queries/*.queryBuilder
 Connections/*.yaml
 Connections/*.yml
 Connections/*.md
