@@ -84,15 +84,27 @@ _RUN_QUERY_TEMPLATE = textwrap.dedent("""\
 
 
     if __name__ == "__main__":
+        from rich.console import Console
+        from rich.table import Table
+
         if not QUERY_FILE.exists():
             print(f"Query file not found: {{QUERY_FILE}}")
             sys.exit(1)
 
         dax = QUERY_FILE.read_text(encoding="utf-8")
-        print(f"Running {{QUERY_FILE.name}} ...")
+        console = Console()
+        console.print(f"[bold]Running {{QUERY_FILE.name}} ...[/bold]")
         df = dax_to_pandas(dax, CONNECTION_STRING)
-        print(f"{{len(df)}} rows x {{len(df.columns)}} cols")
-        print(df.to_string(index=False))
+        console.print(f"[green]{{len(df)}} rows x {{len(df.columns)}} cols[/green]\\n")
+
+        table = Table(show_lines=True, title=QUERY_FILE.stem)
+        for col in df.columns:
+            table.add_column(col, style="cyan")
+        for _, row in df.head(50).iterrows():
+            table.add_row(*[str(v) for v in row])
+        if len(df) > 50:
+            table.caption = f"Showing 50 of {{len(df)}} rows"
+        console.print(table)
 """)
 
 
@@ -105,6 +117,7 @@ _PYPROJECT_TEMPLATE = textwrap.dedent("""\
     dependencies = [
         "pandas>=2.3.0",
         "pywin32>=310",
+        "rich>=13.0.0",
     ]
 """)
 
