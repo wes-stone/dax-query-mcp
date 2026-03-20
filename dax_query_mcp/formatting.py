@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 import pandas as pd
 
 DEFAULT_DATE_FORMAT = "%b-%d-%Y"
+
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 
 def _format_dates(dataframe: pd.DataFrame, date_format: str) -> pd.DataFrame:
@@ -35,7 +38,7 @@ def dataframe_to_markdown(
     date_format: str = DEFAULT_DATE_FORMAT,
 ) -> str:
     preview = preview_records(dataframe, max_rows, date_format=date_format)
-    columns = [str(column) for column in dataframe.columns]
+    columns = [_ANSI_ESCAPE_RE.sub("", str(column)) for column in dataframe.columns]
     if not columns:
         return "_No columns_"
     if not preview:
@@ -61,4 +64,5 @@ def dataframe_dtypes_to_markdown(dataframe: pd.DataFrame) -> str:
 
 def _escape_cell(value: Any) -> str:
     text = "" if value is None else str(value)
+    text = _ANSI_ESCAPE_RE.sub("", text)
     return text.replace("|", "\\|").replace("\n", " ")

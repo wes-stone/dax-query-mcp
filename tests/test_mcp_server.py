@@ -150,3 +150,16 @@ def test_query_builder_schema_and_error_guidance() -> None:
     else:
         raise AssertionError("Expected save_query_builder to raise on invalid payload")
 
+
+def test_summarize_dataframe_strips_ansi_codes():
+    """ANSI escape codes in column names or values must not leak into markdown."""
+    df = pd.DataFrame({
+        "\x1b[22;219mFiscal_Month\x1b[39m": ["Jan-2026"],
+        "\x1b[19mRevenue\x1b[39m": [100.0],
+    })
+    result = summarize_dataframe(df, preview_rows=10)
+    md = result["markdown_table"]
+    assert "\x1b" not in md
+    assert "Fiscal_Month" in md
+    assert "Revenue" in md
+
