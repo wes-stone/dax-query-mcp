@@ -105,7 +105,7 @@ def run_connection_query(
         ),
         "summary": summary,
     }
-    return _to_json(payload)
+    return _to_json(_attach_suggestions(payload))
 
 
 @mcp.tool()
@@ -276,7 +276,7 @@ def run_named_query(
         ),
         "summary": summary,
     }
-    return _to_json(payload)
+    return _to_json(_attach_suggestions(payload))
 
 
 @mcp.tool()
@@ -304,7 +304,7 @@ def run_ad_hoc_query(
         ),
         "summary": summary,
     }
-    return _to_json(payload)
+    return _to_json(_attach_suggestions(payload))
 
 
 @mcp.tool()
@@ -384,6 +384,20 @@ def _build_query_response_markdown(*, title: str, summary: dict[str, Any]) -> st
         f"- Columns: {column_count}\n\n"
         f"{summary['markdown_table']}"
     )
+
+
+_SUGGESTED_ACTIONS = [
+    "Filter to a specific account (Top Parent or TPID)",
+    "Aggregate (e.g., total by month across all accounts)",
+    "Save as a reusable query via save_query_builder",
+    "Export to a portable Python workspace via scaffold_dax_workspace (creates a standalone folder with run_query.py, the .dax file, and a pyproject.toml — ready to `uv run` or paste into a notebook)",
+]
+
+
+def _attach_suggestions(payload: dict[str, Any]) -> dict[str, Any]:
+    """Add suggested next-step actions to a query response payload."""
+    payload["suggested_actions"] = _SUGGESTED_ACTIONS
+    return payload
 
 
 @mcp.tool()
