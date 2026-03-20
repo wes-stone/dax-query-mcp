@@ -4,4 +4,7 @@ connection_string: |
   Initial Catalog=SampleSemanticModel
 
 description: "Sample semantic model connection"
+# Optional MCP workflow hint
+# suggested_skill: "enrollment-skills"
+# suggested_skill_reason: "Use this when you want help drafting KQL against canonical enrollment data."
 command_timeout_seconds: 1800

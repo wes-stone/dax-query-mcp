@@ -9,6 +9,7 @@ from mcp.server.fastmcp import FastMCP
 
 from .connections import load_connections, resolve_connections_dir
 from .executor import dax_to_pandas
+from .formatting import dataframe_to_markdown, preview_records
 from .query_builder import (
     load_query_builder_artifacts,
     query_builder_from_dict,
@@ -41,6 +42,8 @@ def list_connections(connections_dir: str = DEFAULT_CONNECTIONS_DIR) -> str:
             {
                 "name": connection.name,
                 "description": connection.description,
+                "suggested_skill": connection.suggested_skill,
+                "suggested_skill_reason": connection.suggested_skill_reason,
                 "has_context_markdown": connection.context_markdown is not None,
                 "context_path": connection.context_path,
             }
@@ -60,6 +63,8 @@ def get_connection_context(
     payload = {
         "connection_name": connection.name,
         "description": connection.description,
+        "suggested_skill": connection.suggested_skill,
+        "suggested_skill_reason": connection.suggested_skill_reason,
         "context_path": connection.context_path,
         "context_markdown": connection.context_markdown,
     }
@@ -282,7 +287,8 @@ def summarize_dataframe(dataframe: pd.DataFrame, *, preview_rows: int) -> dict[s
         "row_count": int(len(dataframe)),
         "column_count": int(len(dataframe.columns)),
         "columns": [str(column) for column in dataframe.columns],
-        "preview": _preview_records(dataframe, preview_count),
+        "preview": preview_records(dataframe, preview_count),
+        "markdown_table": dataframe_to_markdown(dataframe, max_rows=preview_count),
     }
 
 
@@ -297,13 +303,9 @@ def summarize_rowset(
     return {
         "row_count": int(len(dataframe)),
         "columns": [str(column) for column in dataframe.columns],
-        "preview": _preview_records(preview_frame, max(1, preview_rows)),
+        "preview": preview_records(preview_frame, max(1, preview_rows)),
+        "markdown_table": dataframe_to_markdown(preview_frame, max_rows=max(1, preview_rows)),
     }
-
-
-def _preview_records(dataframe: pd.DataFrame, preview_rows: int) -> list[dict[str, Any]]:
-    preview_json = dataframe.head(preview_rows).to_json(orient="records", date_format="iso")
-    return json.loads(preview_json)
 
 
 def _to_json(payload: Any) -> str:

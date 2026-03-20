@@ -10,6 +10,7 @@ from loguru import logger
 
 from .config import load_queries
 from .executor import DAXExecutor
+from .formatting import dataframe_dtypes_to_markdown, dataframe_to_markdown
 from .models import DAXQueryConfig
 
 
@@ -127,8 +128,8 @@ class DAXPipeline:
 
     @staticmethod
     def _preview(dataframe: pd.DataFrame) -> None:
-        print("\n--- Preview ---")
-        print(dataframe.head())
-        print("\nColumn info:")
-        print(dataframe.dtypes)
+        print("\n--- Preview (markdown) ---")
+        print(dataframe_to_markdown(dataframe, max_rows=5))
+        print("\n--- Column info (markdown) ---")
+        print(dataframe_dtypes_to_markdown(dataframe))
 

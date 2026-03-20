@@ -162,6 +162,11 @@ def save_query_builder_artifacts(
         "queries_dir": str(directory),
         "dax_path": str(dax_path),
         "query_builder_path": str(builder_path),
+        "dax_studio_open_path": str(dax_path),
+        "dax_studio_note": (
+            "You can open the generated .dax file in DAX Studio. "
+            "The paired .dax.queryBuilder file is retained by dax-query-mcp as structured builder metadata."
+        ),
     }
 
 

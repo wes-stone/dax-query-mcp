@@ -58,7 +58,9 @@ def main() -> int:
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="DAX Pipeline - Configuration-driven Power BI data extraction")
+    parser = argparse.ArgumentParser(
+        description="DAX query runner and query-builder tooling for Power BI semantic models"
+    )
     parser.add_argument("--preview", action="store_true", help="Show preview of query results")
     parser.add_argument("--export", action="store_true", help="Export results to CSV files")
     parser.add_argument(

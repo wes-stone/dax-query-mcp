@@ -24,6 +24,8 @@ class DAXConnectionConfig:
     name: str
     connection_string: str
     description: str | None = None
+    suggested_skill: str | None = None
+    suggested_skill_reason: str | None = None
     connection_timeout_seconds: int = 300
     command_timeout_seconds: int = 1800
     max_rows: int | None = None

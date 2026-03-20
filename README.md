@@ -5,7 +5,7 @@
 It supports:
 
 - a CLI for running configured queries
-- saving query-builder artifacts as `.dax` + `.dax.queryBuilder`
+- a first-class query-builder save flow for `.dax` + `.dax.queryBuilder`
 - a connection-centric MCP server for AI clients
 - optional markdown context files per connection
 
@@ -48,6 +48,9 @@ connection_string: |
   Initial Catalog=SampleSemanticModel
 
 description: "Sample semantic model connection"
+# Optional MCP workflow hint
+# suggested_skill: "enrollment-skills"
+# suggested_skill_reason: "Use this when you want help drafting KQL against canonical enrollment data."
 command_timeout_seconds: 1800
 ```
 
@@ -67,6 +70,8 @@ Document important tables, measures, naming conventions, and business context he
 - `get_query_builder`
 
 The bundled `sample_connection` scaffold stays in the repo for reference, but it is hidden from normal MCP connection listings so only your real connections show up.
+
+If a connection YAML includes `suggested_skill` and `suggested_skill_reason`, both `list_connections` and `get_connection_context` will surface that hint so an MCP client can steer the user toward the right workflow.
 
 ### Local MCP config example
 
@@ -164,7 +169,15 @@ Save it with:
 uv run dax-query --save-query-builder-from builder.json --config-dir queries
 ```
 
+There is also a dedicated alias if you want to surface the builder workflow more explicitly:
+
+```bash
+uv run dax-query-builder --save-query-builder-from builder.json --config-dir queries
+```
+
 Saved query-builder artifacts are also loaded by the normal query loader, so they can be listed and run like other saved queries as long as the referenced `connection_name` exists in `Connections\`.
+
+You can open the generated `.dax` file directly in **DAX Studio**. The accompanying `.dax.queryBuilder` file is kept by `dax-query-mcp` as structured builder metadata.
 
 ## Packaging
 

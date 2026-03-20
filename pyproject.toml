@@ -18,6 +18,7 @@ dependencies = [
 
 [project.scripts]
 dax-query = "dax_query_mcp.cli:main"
+dax-query-builder = "dax_query_mcp.cli:main"
 dax-query-server = "dax_query_mcp.mcp_server:main"
 dax-query-guard = "dax_query_mcp.copilot_guard:main"
 

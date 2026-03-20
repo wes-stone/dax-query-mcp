@@ -13,6 +13,8 @@ connection_string: |
   Data Source=powerbi://api.powerbi.com/v1.0/myorg/SampleWorkspace?readonly;
   Initial Catalog=SampleSemanticModel
 description: "Sample semantic model"
+suggested_skill: "enrollment-skills"
+suggested_skill_reason: "Use this when you want help drafting KQL for this model."
 command_timeout_seconds: 120
 """.strip(),
         encoding="utf-8",
@@ -26,6 +28,8 @@ command_timeout_seconds: 120
     connection = connections["sample_model"]
 
     assert connection.description == "Sample semantic model"
+    assert connection.suggested_skill == "enrollment-skills"
+    assert connection.suggested_skill_reason == "Use this when you want help drafting KQL for this model."
     assert connection.command_timeout_seconds == 120
     assert connection.context_markdown.startswith("# Sample Semantic Model")
     assert connection.context_path is not None

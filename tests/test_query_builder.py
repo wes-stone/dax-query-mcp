@@ -34,6 +34,8 @@ def test_save_and_load_query_builder_artifacts(tmp_path: Path) -> None:
 
     assert Path(result["dax_path"]).exists()
     assert Path(result["query_builder_path"]).exists()
+    assert result["dax_studio_open_path"].endswith("monthly_revenue.dax")
+    assert "DAX Studio" in result["dax_studio_note"]
     assert loaded_definition.connection_name == "example_connection"
     assert loaded_definition.measures[0].caption == "Revenue"
     assert "SUMMARIZECOLUMNS" in dax_query

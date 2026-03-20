@@ -38,3 +38,4 @@ def test_cli_saves_query_builder_artifacts(monkeypatch, capsys, tmp_path: Path) 
     assert exit_code == 0
     assert Path(payload["dax_path"]).exists()
     assert Path(payload["query_builder_path"]).exists()
+    assert payload["dax_studio_open_path"].endswith("monthly_revenue.dax")

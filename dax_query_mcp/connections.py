@@ -44,6 +44,9 @@ connection_string: |
   Initial Catalog=YourDataset
 
 description: "Semantic model connection for ad hoc DAX queries"
+# Optional MCP workflow hint
+# suggested_skill: "enrollment-skills"
+# suggested_skill_reason: "Use this when you want help drafting KQL against canonical enrollment data."
 # Optional safety controls
 # connection_timeout_seconds: 300
 # command_timeout_seconds: 1800
@@ -120,6 +123,13 @@ def _build_connection_config(
 ) -> DAXConnectionConfig:
     connection_string = _require_string(raw_config, "connection_string", connection_name, source)
     description = _optional_string(raw_config.get("description"), "description", connection_name, source)
+    suggested_skill = _optional_string(raw_config.get("suggested_skill"), "suggested_skill", connection_name, source)
+    suggested_skill_reason = _optional_string(
+        raw_config.get("suggested_skill_reason"),
+        "suggested_skill_reason",
+        connection_name,
+        source,
+    )
     connection_timeout_seconds = _coerce_int(
         raw_config.get("connection_timeout_seconds", 300),
         "connection_timeout_seconds",
@@ -145,6 +155,8 @@ def _build_connection_config(
         name=connection_name,
         connection_string=connection_string,
         description=description,
+        suggested_skill=suggested_skill,
+        suggested_skill_reason=suggested_skill_reason,
         connection_timeout_seconds=connection_timeout_seconds,
         command_timeout_seconds=command_timeout_seconds,
         max_rows=max_rows,
