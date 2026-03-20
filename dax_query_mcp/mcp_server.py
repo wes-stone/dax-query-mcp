@@ -105,7 +105,7 @@ def run_connection_query(
         ),
         "summary": summary,
     }
-    return _to_json(_attach_suggestions(payload))
+    return _to_json(payload)
 
 
 @mcp.tool()
@@ -276,7 +276,7 @@ def run_named_query(
         ),
         "summary": summary,
     }
-    return _to_json(_attach_suggestions(payload))
+    return _to_json(payload)
 
 
 @mcp.tool()
@@ -304,7 +304,7 @@ def run_ad_hoc_query(
         ),
         "summary": summary,
     }
-    return _to_json(_attach_suggestions(payload))
+    return _to_json(payload)
 
 
 @mcp.tool()
@@ -382,22 +382,15 @@ def _build_query_response_markdown(*, title: str, summary: dict[str, Any]) -> st
         f"### {title}\n\n"
         f"- Rows: {summary['row_count']}\n"
         f"- Columns: {column_count}\n\n"
-        f"{summary['markdown_table']}"
+        f"{summary['markdown_table']}\n\n"
+        f"---\n"
+        f"**What would you like to do next?**\n\n"
+        f"1. 🔍 **Filter / refine** — narrow to a specific account, TPID, or time range\n"
+        f"2. 📊 **Aggregate** — total by month, by account, etc.\n"
+        f"3. 📋 **Export as CSV** — save results to a CSV file\n"
+        f"4. 🛠️ **Save to DAX Studio** — save as a `.dax` query builder file you can open in DAX Studio\n"
+        f"5. 📦 **Scaffold Python workspace** — export to a standalone Python project with `uv run` support\n"
     )
-
-
-_SUGGESTED_ACTIONS = [
-    "Filter to a specific account (Top Parent or TPID)",
-    "Aggregate (e.g., total by month across all accounts)",
-    "Save as a reusable query via save_query_builder",
-    "Export to a portable Python workspace via scaffold_dax_workspace — ask the user where to save it first",
-]
-
-
-def _attach_suggestions(payload: dict[str, Any]) -> dict[str, Any]:
-    """Add suggested next-step actions to a query response payload."""
-    payload["suggested_actions"] = _SUGGESTED_ACTIONS
-    return payload
 
 
 @mcp.tool()
