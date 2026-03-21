@@ -7,6 +7,7 @@ from .executor import DAXExecutor, dax_to_pandas, redact_connection_string
 from .mcp_server import mcp
 from .models import DAXConnectionConfig, DAXQueryConfig
 from .pipeline import DAXPipeline
+from .profiling import QueryProfiler
 from .query_builder import (
     QUERY_BUILDER_SUFFIX,
     QueryBuilderDefinition,
@@ -31,6 +32,7 @@ __all__ = [
     "QueryBuilderFilter",
     "QueryBuilderMeasure",
     "QueryBuilderOrderBy",
+    "QueryProfiler",
     "build_query_builder_dax",
     "copilot_guard_main",
     "create_sample_connection_config",

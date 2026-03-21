@@ -3,14 +3,22 @@ from __future__ import annotations
 import json
 import os
 import re
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 from mcp.server.fastmcp import FastMCP
-from mcp.server.fastmcp.exceptions import ToolError
 
 from .connections import load_connections, resolve_connections_dir
+from .errors import (
+    admin_query_blocked,
+    connection_not_found,
+    execution_failed,
+    invalid_params,
+    query_timeout,
+)
+from .exceptions import DAXExecutionError
 from .executor import dax_to_pandas
 from .formatting import DEFAULT_DATE_FORMAT, dataframe_to_markdown, preview_records
 from .query_builder import (
@@ -90,20 +98,16 @@ def validate_dax_query(query: str) -> None:
     """Reject queries that require admin privileges or perform DDL.
 
     Allows safe $SYSTEM.MDSCHEMA_* rowsets used by inspect_connection.
-    Raises ToolError with a helpful message so the LLM can self-correct.
+    Raises ToolError with a structured JSON payload so the LLM can self-correct.
     """
     upper = query.strip().upper()
     for prefix in _SAFE_SYSTEM_PREFIXES:
         if prefix.upper() in upper:
             return
 
-    if _ADMIN_QUERY_PATTERNS.search(query):
-        raise ToolError(
-            "This query uses admin-required syntax (INFO.*(), $SYSTEM.DISCOVER_*, "
-            "DBCC, ALTER, CREATE, DELETE, or DROP) which will fail without admin "
-            "privileges. Use get_connection_context to discover tables, columns, "
-            "and measures instead."
-        )
+    match = _ADMIN_QUERY_PATTERNS.search(query)
+    if match:
+        raise admin_query_blocked(blocked_pattern=match.group().strip())
 
 
 @mcp.tool()
@@ -165,21 +169,29 @@ def run_connection_query(
     connections_dir: str = DEFAULT_CONNECTIONS_DIR,
     preview_rows: int = DEFAULT_PREVIEW_ROWS,
     max_rows: int | None = None,
+    profile: bool = False,
 ) -> str:
     """Run a DAX query against a named connection and return a preview.
 
     Present the markdown_table as a table and the next_steps list as a
     numbered list after every result.
+    Set profile=true to include per-phase timing information in the response.
     """
     validate_dax_query(query)
     connection = _get_connection(connection_name, connections_dir)
-    dataframe = dax_to_pandas(
-        dax_query=query,
-        conn_str=connection.connection_string,
-        connection_timeout_seconds=connection.connection_timeout_seconds,
-        command_timeout_seconds=connection.command_timeout_seconds,
-        max_rows=max_rows or connection.max_rows,
-    )
+    try:
+        dataframe = dax_to_pandas(
+            dax_query=query,
+            conn_str=connection.connection_string,
+            connection_timeout_seconds=connection.connection_timeout_seconds,
+            command_timeout_seconds=connection.command_timeout_seconds,
+            max_rows=max_rows or connection.max_rows,
+            profile=profile,
+        )
+    except DAXExecutionError as exc:
+        if "timeout" in str(exc).lower() or "timed out" in str(exc).lower():
+            raise query_timeout(query, connection.command_timeout_seconds, exc) from exc
+        raise execution_failed(query, exc) from exc
 
     summary = summarize_dataframe(dataframe, preview_rows=preview_rows)
     payload = {
@@ -194,6 +206,8 @@ def run_connection_query(
         "next_steps": _NEXT_STEPS,
         "summary": summary,
     }
+    if profile and "profiling" in dataframe.attrs:
+        payload["profiling"] = dataframe.attrs["profiling"]
     return _to_json(payload)
 
 
@@ -250,14 +264,18 @@ def save_query_builder(
        - "order_by": list of sort definitions
     """
     if not queries_dir.strip():
-        raise ValueError(
-            "queries_dir is required — ask the user where to save before calling this tool."
+        raise invalid_params(
+            message="queries_dir is required.",
+            suggestion="Ask the user where to save before calling this tool.",
+            parameter="queries_dir",
         )
     try:
         definition = query_builder_from_dict(json.loads(query_builder_json))
     except ValueError as exc:
-        raise ValueError(
-            f"{exc}. Call get_query_builder_schema first for a valid payload template."
+        raise invalid_params(
+            message=str(exc),
+            suggestion="Call get_query_builder_schema first for a valid payload template.",
+            parameter="query_builder_json",
         ) from exc
     payload = save_query_builder_artifacts(definition, queries_dir=queries_dir, overwrite=overwrite)
     return _to_json(payload)
@@ -379,9 +397,17 @@ def run_named_query(
     from .pipeline import DAXPipeline
 
     pipeline = DAXPipeline(config_dir=config_dir)
-    dataframe = pipeline.run_query(query_name, preview=False, export=False)
+    try:
+        dataframe = pipeline.run_query(query_name, preview=False, export=False)
+    except Exception as exc:
+        if "timeout" in str(exc).lower() or "timed out" in str(exc).lower():
+            raise query_timeout(query_name, 0, exc) from exc
+        raise execution_failed(query_name, exc) from exc
     if dataframe is None:
-        raise ValueError(f"Query '{query_name}' could not be executed from config_dir='{config_dir}'.")
+        raise execution_failed(
+            query_name,
+            ValueError(f"Query '{query_name}' could not be executed from config_dir='{config_dir}'."),
+        )
 
     summary = summarize_dataframe(dataframe, preview_rows=preview_rows)
     payload = {
@@ -406,19 +432,28 @@ def run_ad_hoc_query(
     preview_rows: int = DEFAULT_PREVIEW_ROWS,
     command_timeout_seconds: int = 1800,
     max_rows: int | None = None,
+    profile: bool = False,
 ) -> str:
     """Run a DAX query against a raw connection string.
 
     Present the markdown_table as a table and the next_steps list as a
     numbered list after every result.
+    Set profile=true to include per-phase timing information in the response.
     """
     validate_dax_query(query)
-    dataframe = dax_to_pandas(
-        dax_query=query,
-        conn_str=connection_string,
-        command_timeout_seconds=command_timeout_seconds,
-        max_rows=max_rows,
-    )
+    try:
+        dataframe = dax_to_pandas(
+            dax_query=query,
+            conn_str=connection_string,
+            command_timeout_seconds=command_timeout_seconds,
+            max_rows=max_rows,
+            profile=profile,
+        )
+    except DAXExecutionError as exc:
+        if "timeout" in str(exc).lower() or "timed out" in str(exc).lower():
+            raise query_timeout(query, command_timeout_seconds, exc) from exc
+        raise execution_failed(query, exc) from exc
+
     summary = summarize_dataframe(dataframe, preview_rows=preview_rows)
     payload = {
         "presentation_hint": _MARKDOWN_PRESENTATION_HINT,
@@ -430,6 +465,8 @@ def run_ad_hoc_query(
         "next_steps": _NEXT_STEPS,
         "summary": summary,
     }
+    if profile and "profiling" in dataframe.attrs:
+        payload["profiling"] = dataframe.attrs["profiling"]
     return _to_json(payload)
 
 
@@ -528,6 +565,63 @@ def _build_query_response_markdown(*, title: str, summary: dict[str, Any]) -> st
 
 
 @mcp.tool()
+def copy_to_clipboard(
+    connection_name: str,
+    query: str,
+    format: str = "tsv",
+    connections_dir: str = DEFAULT_CONNECTIONS_DIR,
+    max_rows: int | None = None,
+) -> str:
+    """Run a DAX query and copy the full result to the system clipboard.
+
+    Use format="tsv" (default) to paste into Excel, or format="markdown" for
+    a markdown table. Returns a JSON summary with row_count and a short preview.
+    """
+    import pyperclip
+
+    if format not in ("tsv", "markdown"):
+        raise invalid_params(
+            message=f"Unsupported format '{format}'.",
+            suggestion="Use format='tsv' (for Excel paste) or format='markdown' (for markdown table).",
+            parameter="format",
+            provided=format,
+            allowed=["tsv", "markdown"],
+        )
+
+    validate_dax_query(query)
+    connection = _get_connection(connection_name, connections_dir)
+    try:
+        dataframe = dax_to_pandas(
+            dax_query=query,
+            conn_str=connection.connection_string,
+            connection_timeout_seconds=connection.connection_timeout_seconds,
+            command_timeout_seconds=connection.command_timeout_seconds,
+            max_rows=max_rows or connection.max_rows,
+        )
+    except DAXExecutionError as exc:
+        if "timeout" in str(exc).lower() or "timed out" in str(exc).lower():
+            raise query_timeout(query, connection.command_timeout_seconds, exc) from exc
+        raise execution_failed(query, exc) from exc
+
+    if format == "tsv":
+        clipboard_text = dataframe.to_csv(sep="\t", index=False)
+    else:
+        clipboard_text = dataframe_to_markdown(dataframe, max_rows=len(dataframe))
+
+    pyperclip.copy(clipboard_text)
+
+    preview_rows = min(5, len(dataframe))
+    preview = preview_records(dataframe, preview_rows)
+    payload = {
+        "format": format,
+        "row_count": len(dataframe),
+        "preview": preview,
+        "message": f"Copied {len(dataframe)} rows as {format.upper()} to clipboard.",
+    }
+    return _to_json(payload)
+
+
+@mcp.tool()
 def scaffold_dax_workspace(
     output_dir: str,
     query_text: str,
@@ -566,6 +660,51 @@ def scaffold_dax_workspace(
     return _to_json(result)
 
 
+@mcp.tool()
+def export_to_csv(
+    connection_name: str,
+    query: str,
+    output_dir: str,
+    connections_dir: str = DEFAULT_CONNECTIONS_DIR,
+    filename_prefix: str = "export",
+    max_rows: int | None = None,
+) -> str:
+    """Export DAX query results to a timestamped CSV file.
+
+    Returns JSON with file_path, row_count, and column_count.
+    """
+    validate_dax_query(query)
+    connection = _get_connection(connection_name, connections_dir)
+    try:
+        dataframe = dax_to_pandas(
+            dax_query=query,
+            conn_str=connection.connection_string,
+            connection_timeout_seconds=connection.connection_timeout_seconds,
+            command_timeout_seconds=connection.command_timeout_seconds,
+            max_rows=max_rows or connection.max_rows,
+        )
+    except DAXExecutionError as exc:
+        if "timeout" in str(exc).lower() or "timed out" in str(exc).lower():
+            raise query_timeout(query, connection.command_timeout_seconds, exc) from exc
+        raise execution_failed(query, exc) from exc
+
+    out_path = Path(output_dir)
+    out_path.mkdir(parents=True, exist_ok=True)
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"{filename_prefix}_{timestamp}.csv"
+    file_path = out_path / filename
+
+    dataframe.to_csv(file_path, index=False)
+
+    payload = {
+        "file_path": str(file_path),
+        "row_count": int(len(dataframe)),
+        "column_count": int(len(dataframe.columns)),
+    }
+    return _to_json(payload)
+
+
 def _to_json(payload: Any) -> str:
     return json.dumps(payload, indent=2, default=str)
 
@@ -574,8 +713,10 @@ def _get_connection(connection_name: str, connections_dir: str) -> Any:
     connections = load_connections(connections_dir)
     connection = connections.get(connection_name)
     if connection is None:
-        raise ValueError(
-            f"Connection '{connection_name}' was not found in '{resolve_connections_dir(connections_dir)}'."
+        raise connection_not_found(
+            connection_name=connection_name,
+            connections_dir=str(resolve_connections_dir(connections_dir)),
+            available=list(connections.keys()),
         )
     return connection
 

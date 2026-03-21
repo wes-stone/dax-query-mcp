@@ -179,7 +179,7 @@ def test_dax_to_pandas_uses_executor_defaults(monkeypatch) -> None:
         def __init__(self, **kwargs):
             pass  # Accept any kwargs from the new signature
 
-        def execute(self, query):
+        def execute(self, query, *, profile=False):
             captured["query"] = query
             return pd.DataFrame({"Value": [1]})
 

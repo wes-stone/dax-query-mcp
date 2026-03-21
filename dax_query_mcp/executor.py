@@ -9,6 +9,7 @@ from loguru import logger
 
 from .exceptions import DAXExecutionError
 from .models import DAXQueryConfig
+from .profiling import QueryProfiler
 
 DispatchFn = Callable[[str], object]
 MSOLAP_INSTALL_URL = (
@@ -34,10 +35,13 @@ def dax_to_pandas(
     connection_timeout_seconds: int = 300,
     command_timeout_seconds: int = 1800,
     max_rows: int | None = None,
+    profile: bool = False,
 ) -> pd.DataFrame:
     """Execute an ad hoc DAX query and return a DataFrame.
 
     If conn_str starts with MOCK://, uses the mock cube dispatcher for testing.
+    When *profile* is True, phase timings are logged to stderr via loguru and
+    attached to the returned DataFrame as ``df.attrs["profiling"]``.
     """
     config = DAXQueryConfig(
         name="adhoc_query",
@@ -47,7 +51,8 @@ def dax_to_pandas(
         command_timeout_seconds=command_timeout_seconds,
         max_rows=max_rows,
     )
-    return DAXExecutor(connection_string=conn_str).execute(config)
+    executor = DAXExecutor(connection_string=conn_str)
+    return executor.execute(config, profile=profile)
 
 
 def redact_connection_string(connection_string: str) -> str:
@@ -79,36 +84,50 @@ class DAXExecutor:
         else:
             self._dispatcher = _default_dispatcher()
 
-    def execute(self, query: DAXQueryConfig) -> pd.DataFrame:
+    def execute(self, query: DAXQueryConfig, *, profile: bool = False) -> pd.DataFrame:
+        profiler = QueryProfiler(query_name=query.name, enabled=profile)
         conn = None
         cmd = None
         recordset = None
 
         try:
-            logger.debug(
-                "Opening ADODB connection for query '{}' using {}",
-                query.name,
-                redact_connection_string(query.connection_string),
-            )
-            conn = self._dispatcher("ADODB.Connection")
-            conn.ConnectionTimeout = query.connection_timeout_seconds
-            conn.CommandTimeout = query.command_timeout_seconds
-            conn.Open(query.connection_string)
+            with profiler:
+                with profiler.phase("connect"):
+                    logger.debug(
+                        "Opening ADODB connection for query '{}' using {}",
+                        query.name,
+                        redact_connection_string(query.connection_string),
+                    )
+                    conn = self._dispatcher("ADODB.Connection")
+                    conn.ConnectionTimeout = query.connection_timeout_seconds
+                    conn.CommandTimeout = query.command_timeout_seconds
+                    conn.Open(query.connection_string)
 
-            cmd = self._dispatcher("ADODB.Command")
-            cmd.ActiveConnection = conn
-            cmd.CommandText = query.dax_query
-            cmd.CommandTimeout = query.command_timeout_seconds
+                with profiler.phase("execute"):
+                    cmd = self._dispatcher("ADODB.Command")
+                    cmd.ActiveConnection = conn
+                    cmd.CommandText = query.dax_query
+                    cmd.CommandTimeout = query.command_timeout_seconds
 
-            logger.debug(
-                "Executing query '{}' (command timeout={}s, max_rows={})",
-                query.name,
-                query.command_timeout_seconds,
-                query.max_rows,
-            )
-            recordset = cmd.Execute()[0]
-            dataframe = _recordset_to_dataframe(recordset, max_rows=query.max_rows)
-            logger.debug("Query '{}' returned shape {}", query.name, dataframe.shape)
+                    logger.debug(
+                        "Executing query '{}' (command timeout={}s, max_rows={})",
+                        query.name,
+                        query.command_timeout_seconds,
+                        query.max_rows,
+                    )
+                    recordset = cmd.Execute()[0]
+
+                with profiler.phase("fetch"):
+                    dataframe = _recordset_to_dataframe(recordset, max_rows=query.max_rows)
+
+                with profiler.phase("normalize"):
+                    dataframe = _normalize_dataframe(dataframe)
+
+                logger.debug("Query '{}' returned shape {}", query.name, dataframe.shape)
+
+            if profile:
+                dataframe.attrs["profiling"] = profiler.to_response_field()
+
             return dataframe
         except Exception as exc:
             raise DAXExecutionError(_format_execution_error(query.name, exc)) from exc
@@ -160,8 +179,7 @@ def _recordset_to_dataframe(recordset: object, *, max_rows: int | None) -> pd.Da
     fields = getattr(recordset, "Fields")
     columns = [field.Name for field in fields]
     rows = list(_iter_recordset_rows(recordset, fields, len(columns), max_rows=max_rows))
-    dataframe = pd.DataFrame(rows, columns=columns) if rows else pd.DataFrame(columns=columns)
-    return _normalize_dataframe(dataframe)
+    return pd.DataFrame(rows, columns=columns) if rows else pd.DataFrame(columns=columns)
 
 
 def _normalize_dataframe(dataframe: pd.DataFrame) -> pd.DataFrame:
