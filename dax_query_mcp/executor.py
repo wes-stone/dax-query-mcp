@@ -40,8 +40,7 @@ def dax_to_pandas(
     """Execute an ad hoc DAX query and return a DataFrame.
 
     If conn_str starts with MOCK://, uses the mock cube dispatcher for testing.
-    When *profile* is True, phase timings are logged to stderr via loguru and
-    attached to the returned DataFrame as ``df.attrs["profiling"]``.
+    When *profile* is True, phase timings are attached to ``df.attrs["profiling"]``.
     """
     config = DAXQueryConfig(
         name="adhoc_query",
@@ -51,8 +50,7 @@ def dax_to_pandas(
         command_timeout_seconds=command_timeout_seconds,
         max_rows=max_rows,
     )
-    executor = DAXExecutor(connection_string=conn_str)
-    return executor.execute(config, profile=profile)
+    return DAXExecutor(connection_string=conn_str).execute(config, profile=profile)
 
 
 def redact_connection_string(connection_string: str) -> str:
@@ -91,41 +89,41 @@ class DAXExecutor:
         recordset = None
 
         try:
-            with profiler:
-                with profiler.phase("connect"):
-                    logger.debug(
-                        "Opening ADODB connection for query '{}' using {}",
-                        query.name,
-                        redact_connection_string(query.connection_string),
-                    )
-                    conn = self._dispatcher("ADODB.Connection")
-                    conn.ConnectionTimeout = query.connection_timeout_seconds
-                    conn.CommandTimeout = query.command_timeout_seconds
-                    conn.Open(query.connection_string)
+            profiler.start_phase("connect")
+            logger.debug(
+                "Opening ADODB connection for query '{}' using {}",
+                query.name,
+                redact_connection_string(query.connection_string),
+            )
+            conn = self._dispatcher("ADODB.Connection")
+            conn.ConnectionTimeout = query.connection_timeout_seconds
+            conn.CommandTimeout = query.command_timeout_seconds
+            conn.Open(query.connection_string)
+            profiler.stop_phase("connect")
 
-                with profiler.phase("execute"):
-                    cmd = self._dispatcher("ADODB.Command")
-                    cmd.ActiveConnection = conn
-                    cmd.CommandText = query.dax_query
-                    cmd.CommandTimeout = query.command_timeout_seconds
+            profiler.start_phase("execute")
+            cmd = self._dispatcher("ADODB.Command")
+            cmd.ActiveConnection = conn
+            cmd.CommandText = query.dax_query
+            cmd.CommandTimeout = query.command_timeout_seconds
 
-                    logger.debug(
-                        "Executing query '{}' (command timeout={}s, max_rows={})",
-                        query.name,
-                        query.command_timeout_seconds,
-                        query.max_rows,
-                    )
-                    recordset = cmd.Execute()[0]
+            logger.debug(
+                "Executing query '{}' (command timeout={}s, max_rows={})",
+                query.name,
+                query.command_timeout_seconds,
+                query.max_rows,
+            )
+            recordset = cmd.Execute()[0]
+            profiler.stop_phase("execute")
 
-                with profiler.phase("fetch"):
-                    dataframe = _recordset_to_dataframe(recordset, max_rows=query.max_rows)
+            profiler.start_phase("fetch")
+            dataframe = _recordset_to_dataframe(recordset, max_rows=query.max_rows)
+            profiler.stop_phase("fetch")
 
-                with profiler.phase("normalize"):
-                    dataframe = _normalize_dataframe(dataframe)
-
-                logger.debug("Query '{}' returned shape {}", query.name, dataframe.shape)
+            logger.debug("Query '{}' returned shape {}", query.name, dataframe.shape)
 
             if profile:
+                profiler.finalize()
                 dataframe.attrs["profiling"] = profiler.to_response_field()
 
             return dataframe
@@ -179,7 +177,8 @@ def _recordset_to_dataframe(recordset: object, *, max_rows: int | None) -> pd.Da
     fields = getattr(recordset, "Fields")
     columns = [field.Name for field in fields]
     rows = list(_iter_recordset_rows(recordset, fields, len(columns), max_rows=max_rows))
-    return pd.DataFrame(rows, columns=columns) if rows else pd.DataFrame(columns=columns)
+    dataframe = pd.DataFrame(rows, columns=columns) if rows else pd.DataFrame(columns=columns)
+    return _normalize_dataframe(dataframe)
 
 
 def _normalize_dataframe(dataframe: pd.DataFrame) -> pd.DataFrame:

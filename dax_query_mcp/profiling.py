@@ -35,16 +35,15 @@ PHASE_NAMES = ("connect", "execute", "fetch", "normalize")
 
 @dataclass(slots=True)
 class QueryProfiler:
-    """Context manager that instruments DAX query execution phases.
+    """Profiler that instruments DAX query execution phases.
 
     Usage::
 
-        profiler = QueryProfiler("my_query")
-        with profiler:
-            with profiler.phase("connect"):
-                ...
-            with profiler.phase("execute"):
-                ...
+        profiler = QueryProfiler("my_query", enabled=True)
+        profiler.start_phase("connect")
+        ...
+        profiler.stop_phase("connect")
+        profiler.finalize()
         print(profiler.timings)
     """
 
@@ -54,7 +53,33 @@ class QueryProfiler:
     _total_start: float = 0.0
     total_elapsed: float = 0.0
 
-    # ── context manager for entire profiling scope ──────────────────────
+    def __post_init__(self) -> None:
+        if self.enabled:
+            self._total_start = time.perf_counter()
+
+    def start_phase(self, name: str) -> None:
+        """Start timing a phase."""
+        if not self.enabled:
+            return
+        if name not in self._phases:
+            self._phases[name] = PhaseTimer(name=name)
+        self._phases[name].start()
+
+    def stop_phase(self, name: str) -> None:
+        """Stop timing a phase."""
+        if not self.enabled:
+            return
+        if name in self._phases:
+            self._phases[name].stop()
+
+    def finalize(self) -> None:
+        """Finalize profiling and log results."""
+        if not self.enabled:
+            return
+        self.total_elapsed = time.perf_counter() - self._total_start
+        self._log()
+
+    # ── context manager interface (for backwards compatibility) ─────────
 
     def __enter__(self) -> QueryProfiler:
         if self.enabled:
@@ -66,8 +91,6 @@ class QueryProfiler:
             return
         self.total_elapsed = time.perf_counter() - self._total_start
         self._log()
-
-    # ── context manager for individual phases ───────────────────────────
 
     class _PhaseContext:
         """Thin context manager returned by ``QueryProfiler.phase()``."""
