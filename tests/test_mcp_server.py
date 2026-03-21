@@ -4,9 +4,12 @@ import pandas as pd
 from mcp.server.fastmcp.exceptions import ToolError
 
 from dax_query_mcp.mcp_server import (
+    _FOLLOWUP_MENU,
     _SERVER_INSTRUCTIONS,
     copy_to_clipboard,
     export_to_csv,
+    followup_menu,
+    generate_data_dictionary,
     get_connection_context,
     get_data_dictionary,
     get_query_builder_schema,
@@ -20,6 +23,7 @@ from dax_query_mcp.mcp_server import (
     scaffold_power_query,
     scaffold_streamlit_app,
     search_columns,
+    search_measures,
     summarize_dataframe,
     summarize_rowset,
 )
@@ -751,6 +755,118 @@ def test_search_columns_max_results(tmp_path) -> None:
     assert len(results) <= 3
 
 
+# ── search_measures tests ───────────────────────────────────────────
+
+
+def test_search_measures_exact_name(tmp_path) -> None:
+    """Exact measure name match appears first in results."""
+    connections_dir = _make_contoso_connections_with_dd(tmp_path)
+    results = json.loads(
+        search_measures(
+            connection_name="contoso",
+            search_term="Total Sales",
+            connections_dir=str(connections_dir),
+        )
+    )
+    assert len(results) > 0
+    assert results[0]["name"] == "Total Sales"
+
+
+def test_search_measures_partial_name(tmp_path) -> None:
+    """Partial name match finds measures containing the term."""
+    connections_dir = _make_contoso_connections_with_dd(tmp_path)
+    results = json.loads(
+        search_measures(
+            connection_name="contoso",
+            search_term="Total",
+            connections_dir=str(connections_dir),
+        )
+    )
+    assert len(results) >= 2
+    names = [r["name"] for r in results]
+    assert "Total Sales" in names
+    assert "Total Quantity" in names
+
+
+def test_search_measures_case_insensitive(tmp_path) -> None:
+    """Search is case-insensitive."""
+    connections_dir = _make_contoso_connections_with_dd(tmp_path)
+    upper = json.loads(
+        search_measures(
+            connection_name="contoso",
+            search_term="TOTAL SALES",
+            connections_dir=str(connections_dir),
+        )
+    )
+    lower = json.loads(
+        search_measures(
+            connection_name="contoso",
+            search_term="total sales",
+            connections_dir=str(connections_dir),
+        )
+    )
+    assert len(upper) > 0
+    assert len(upper) == len(lower)
+    assert upper[0]["name"] == lower[0]["name"]
+
+
+def test_search_measures_includes_descriptions(tmp_path) -> None:
+    """Data dictionary descriptions are included and searchable."""
+    connections_dir = _make_contoso_connections_with_dd(tmp_path)
+    results = json.loads(
+        search_measures(
+            connection_name="contoso",
+            search_term="units sold",
+            connections_dir=str(connections_dir),
+        )
+    )
+    assert len(results) >= 1
+    matched_descs = [r["description"] for r in results]
+    assert any("units sold" in d.lower() for d in matched_descs)
+
+
+def test_search_measures_max_results(tmp_path) -> None:
+    """max_results limits the number of returned matches."""
+    connections_dir = _make_contoso_connections_with_dd(tmp_path)
+    results = json.loads(
+        search_measures(
+            connection_name="contoso",
+            search_term="a",  # broad term to match many measures
+            connections_dir=str(connections_dir),
+            max_results=2,
+        )
+    )
+    assert len(results) <= 2
+
+
+def test_search_measures_expression_truncated(tmp_path) -> None:
+    """Expressions longer than 100 characters are truncated with ellipsis."""
+    connections_dir = _make_contoso_connections_with_dd(tmp_path)
+    import yaml
+    dd_path = connections_dir / "contoso.data_dictionary.yaml"
+    with open(dd_path, encoding="utf-8") as fh:
+        dd = yaml.safe_load(fh)
+    long_expr = "SUMX(Sales, Sales[Amount] * Sales[Quantity])" * 5
+    dd["measures"].append({
+        "name": "Long Measure",
+        "expression": long_expr,
+        "description": "A measure with a very long expression",
+    })
+    with open(dd_path, "w", encoding="utf-8") as fh:
+        yaml.safe_dump(dd, fh)
+
+    results = json.loads(
+        search_measures(
+            connection_name="contoso",
+            search_term="Long Measure",
+            connections_dir=str(connections_dir),
+        )
+    )
+    assert len(results) == 1
+    assert results[0]["expression"].endswith("...")
+    assert len(results[0]["expression"]) <= 104  # 100 chars + "..."
+
+
 # ── get_data_dictionary tests ────────────────────────────────────────
 
 
@@ -827,4 +943,184 @@ def test_get_schema_without_data_dictionary(tmp_path) -> None:
     )
     assert payload["has_data_dictionary"] is False
     assert "inspect_connection" in payload["message"]
+
+
+# ── generate_data_dictionary tests ───────────────────────────────────
+
+
+def test_generate_data_dictionary_valid_yaml(tmp_path) -> None:
+    """generate_data_dictionary returns valid YAML from mock cube."""
+    connections_dir = _make_contoso_connections(tmp_path)
+    payload = json.loads(
+        generate_data_dictionary(
+            connection_name="contoso",
+            connections_dir=str(connections_dir),
+        )
+    )
+    assert "yaml_content" in payload
+    assert payload["table_count"] == 3
+    assert payload["measure_count"] == 5
+    assert "file_path" not in payload
+
+    import yaml
+
+    parsed = yaml.safe_load(payload["yaml_content"])
+    assert parsed["version"] == "1.0"
+    table_names = [t["name"] for t in parsed["tables"]]
+    assert "Sales" in table_names
+    assert "Products" in table_names
+    assert "Calendar" in table_names
+
+
+def test_generate_data_dictionary_roundtrip(tmp_path) -> None:
+    """YAML from generate_data_dictionary can be parsed back to DataDictionary."""
+    from dax_query_mcp.data_dictionary import DataDictionary
+
+    connections_dir = _make_contoso_connections(tmp_path)
+    payload = json.loads(
+        generate_data_dictionary(
+            connection_name="contoso",
+            connections_dir=str(connections_dir),
+        )
+    )
+    import yaml
+
+    raw = yaml.safe_load(payload["yaml_content"])
+    dd = DataDictionary.model_validate(raw)
+    assert len(dd.tables) == 3
+    assert len(dd.measures) == 5
+    assert all(t.description == "" for t in dd.tables)
+    assert all(m.description == "" for m in dd.measures)
+
+
+def test_generate_data_dictionary_file_write(tmp_path) -> None:
+    """generate_data_dictionary writes YAML to disk when output_path provided."""
+    connections_dir = _make_contoso_connections(tmp_path)
+    out_file = tmp_path / "output" / "generated.data_dictionary.yaml"
+    payload = json.loads(
+        generate_data_dictionary(
+            connection_name="contoso",
+            connections_dir=str(connections_dir),
+            output_path=str(out_file),
+        )
+    )
+    assert payload["file_path"] == str(out_file)
+    assert out_file.exists()
+
+    from dax_query_mcp.data_dictionary import load_data_dictionary
+
+    dd = load_data_dictionary(out_file)
+    assert len(dd.tables) == 3
+    assert len(dd.measures) == 5
+
+
+def test_generate_data_dictionary_correct_counts(tmp_path) -> None:
+    """generate_data_dictionary returns correct table and measure counts."""
+    connections_dir = _make_contoso_connections(tmp_path)
+    payload = json.loads(
+        generate_data_dictionary(
+            connection_name="contoso",
+            connections_dir=str(connections_dir),
+        )
+    )
+    assert payload["table_count"] == 3
+    assert payload["measure_count"] == 5
+    import yaml
+
+    measure_names = [m["name"] for m in yaml.safe_load(payload["yaml_content"])["measures"]]
+    assert "Total Sales" in measure_names
+    assert "Total Quantity" in measure_names
+    assert "Avg Price" in measure_names
+    assert "Product Count" in measure_names
+    assert "Day Count" in measure_names
+
+
+# ── followup_menu resource tests ────────────────────────────────────────
+
+_EXPECTED_ACTIONS = {
+    "export_to_csv",
+    "copy_to_clipboard",
+    "quick_chart",
+    "scaffold_power_query",
+    "scaffold_streamlit_app",
+    "scaffold_python",
+    "scaffold_dax_studio",
+}
+
+
+def test_followup_menu_returns_valid_json() -> None:
+    raw = followup_menu()
+    payload = json.loads(raw)
+    assert "actions" in payload
+    assert isinstance(payload["actions"], list)
+
+
+def test_followup_menu_contains_all_expected_actions() -> None:
+    payload = json.loads(followup_menu())
+    action_names = {a["name"] for a in payload["actions"]}
+    assert action_names == _EXPECTED_ACTIONS
+
+
+def test_followup_menu_actions_have_required_fields() -> None:
+    payload = json.loads(followup_menu())
+    for action in payload["actions"]:
+        assert "name" in action, f"Missing 'name' in action: {action}"
+        assert "description" in action, f"Missing 'description' in {action['name']}"
+        assert "required_params" in action, f"Missing 'required_params' in {action['name']}"
+        assert isinstance(action["required_params"], list)
+        assert isinstance(action["description"], str)
+        assert len(action["description"]) > 0
+
+
+def test_followup_menu_actions_have_example_usage() -> None:
+    payload = json.loads(followup_menu())
+    for action in payload["actions"]:
+        assert "example_usage" in action, f"Missing 'example_usage' in {action['name']}"
+        assert isinstance(action["example_usage"], str)
+        assert len(action["example_usage"]) > 0
+
+
+# ---------------------------------------------------------------------------
+# Docstring quality tests
+# ---------------------------------------------------------------------------
+
+from dax_query_mcp.mcp_server import mcp as _mcp_server
+
+
+def _get_mcp_tool_functions():
+    """Return (name, func) pairs for every @mcp.tool()-registered function."""
+    return [(name, tool.fn) for name, tool in _mcp_server._tool_manager._tools.items()]
+
+
+_PLACEHOLDER_PREFIXES = ("todo", "fixme", "hack", "xxx", "placeholder")
+
+
+def test_all_mcp_tools_have_docstrings() -> None:
+    """Every @mcp.tool() function must have a non-empty docstring."""
+    tools = _get_mcp_tool_functions()
+    assert len(tools) > 0, "No MCP tools found — check discovery logic"
+    missing = [name for name, fn in tools if not (fn.__doc__ or "").strip()]
+    assert not missing, f"MCP tools missing docstrings: {missing}"
+
+
+def test_all_mcp_tool_docstrings_are_substantive() -> None:
+    """Every @mcp.tool() docstring must have at least 20 characters."""
+    tools = _get_mcp_tool_functions()
+    short = [
+        (name, len((fn.__doc__ or "").strip()))
+        for name, fn in tools
+        if len((fn.__doc__ or "").strip()) < 20
+    ]
+    assert not short, f"MCP tools with too-short docstrings (<20 chars): {short}"
+
+
+def test_no_mcp_tool_docstrings_are_placeholders() -> None:
+    """No @mcp.tool() docstring should start with TODO/FIXME/HACK/XXX."""
+    tools = _get_mcp_tool_functions()
+    placeholders = [
+        name
+        for name, fn in tools
+        if (fn.__doc__ or "").strip().lower().startswith(_PLACEHOLDER_PREFIXES)
+    ]
+    assert not placeholders, f"MCP tools with placeholder docstrings: {placeholders}"
 

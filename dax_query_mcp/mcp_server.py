@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
+import yaml
 from mcp.server.fastmcp import FastMCP
 
 from .connections import load_connections, resolve_connections_dir
@@ -30,7 +31,7 @@ from .query_builder import (
     query_builder_to_payload,
     save_query_builder_artifacts,
 )
-from .data_dictionary import DataDictionary, load_data_dictionary
+from .data_dictionary import DataDictionary, load_data_dictionary, save_data_dictionary, TableDef, MeasureDef
 from .scaffold import scaffold_workspace
 
 DEFAULT_CONNECTIONS_DIR = str(resolve_connections_dir(os.getenv("DAX_QUERY_MCP_CONNECTIONS_DIR")))
@@ -168,6 +169,64 @@ After every successful query, offer these follow-up actions:
 """
 
 mcp = FastMCP("dax-query-server", instructions=_SERVER_INSTRUCTIONS)
+
+
+# ── Follow-up menu resource ─────────────────────────────────────────────
+
+_FOLLOWUP_MENU: list[dict[str, Any]] = [
+    {
+        "name": "export_to_csv",
+        "description": "Export query results to a timestamped CSV file.",
+        "required_params": ["connection_name", "query", "output_dir"],
+        "example_usage": 'export_to_csv(connection_name="sales", query="EVALUATE ...", output_dir="./export")',
+    },
+    {
+        "name": "copy_to_clipboard",
+        "description": "Copy query results to the system clipboard as TSV (for Excel) or markdown.",
+        "required_params": ["connection_name", "query"],
+        "example_usage": 'copy_to_clipboard(connection_name="sales", query="EVALUATE ...", format="tsv")',
+    },
+    {
+        "name": "quick_chart",
+        "description": "Generate a chart (bar, line, or pie) from query results.",
+        "required_params": ["connection_name", "query", "chart_type", "x_column", "y_column"],
+        "example_usage": 'quick_chart(connection_name="sales", query="EVALUATE ...", chart_type="bar", x_column="Month", y_column="Revenue")',
+    },
+    {
+        "name": "scaffold_power_query",
+        "description": "Generate Excel Power Query M code to import DAX query results.",
+        "required_params": ["connection_name", "query"],
+        "example_usage": 'scaffold_power_query(connection_name="sales", query="EVALUATE ...", table_name="DAXResults")',
+    },
+    {
+        "name": "scaffold_streamlit_app",
+        "description": "Generate a Streamlit dashboard app for visualizing query results.",
+        "required_params": ["connection_name", "query"],
+        "example_usage": 'scaffold_streamlit_app(connection_name="sales", query="EVALUATE ...", title="Sales Dashboard")',
+    },
+    {
+        "name": "scaffold_python",
+        "description": "Generate a standalone Python project with run_query.py, notebook, and pyproject.toml. Uses save_query_builder under the hood.",
+        "required_params": ["output_dir", "query_text"],
+        "example_usage": 'scaffold_dax_workspace(output_dir="./my_project", query_text="EVALUATE ...", connection_name="sales")',
+    },
+    {
+        "name": "scaffold_dax_studio",
+        "description": "Save the query as .dax and .dax.queryBuilder artifacts for DAX Studio. Uses save_query_builder under the hood.",
+        "required_params": ["query_builder_json", "queries_dir"],
+        "example_usage": 'save_query_builder(query_builder_json="...", queries_dir="./queries")',
+    },
+]
+
+
+@mcp.resource("followup://menu")
+def followup_menu() -> str:
+    """Return a structured menu of available follow-up actions after running a query.
+
+    Each item includes name, description, required_params, and example_usage
+    so an LLM can suggest appropriate next actions to the user.
+    """
+    return _to_json({"actions": _FOLLOWUP_MENU})
 
 
 def validate_dax_query(query: str) -> None:
@@ -775,6 +834,61 @@ def search_columns(
     return _to_json(matches[:max_results])
 
 
+@mcp.tool()
+def search_measures(
+    connection_name: str,
+    search_term: str,
+    connections_dir: str = DEFAULT_CONNECTIONS_DIR,
+    max_results: int = 20,
+) -> str:
+    """Search measures for a connection by name, description, or expression.
+
+    Performs a case-insensitive substring match on measure names and, when a
+    data dictionary exists, measure descriptions and DAX expressions.  Returns
+    a JSON array sorted by relevance: exact match > starts-with > contains.
+    Expressions are truncated to 100 characters.
+
+    Required parameters: connection_name, search_term.
+    Optional parameters: connections_dir, max_results (default 20).
+
+    Use this when the user asks "which measure calculates revenue?" or similar
+    discovery questions.
+    """
+    _get_connection(connection_name, connections_dir)
+
+    dd: DataDictionary | None = None
+    dd_path = Path(resolve_connections_dir(connections_dir)) / f"{connection_name}.data_dictionary.yaml"
+    if dd_path.exists():
+        dd = load_data_dictionary(dd_path)
+
+    matches: list[dict[str, Any]] = []
+    term_lower = search_term.lower()
+
+    if dd is not None:
+        for measure in dd.measures:
+            name_lower = measure.name.lower()
+            expr_lower = measure.expression.lower() if measure.expression else ""
+            desc_lower = measure.description.lower() if measure.description else ""
+            if term_lower in name_lower or term_lower in desc_lower or term_lower in expr_lower:
+                expression = measure.expression or ""
+                matches.append({
+                    "name": measure.name,
+                    "expression": expression[:100] + ("..." if len(expression) > 100 else ""),
+                    "description": measure.description or "",
+                })
+
+    def _relevance(m: dict[str, Any]) -> tuple[int, str]:
+        name_lower = m["name"].lower()
+        if name_lower == term_lower:
+            return (0, name_lower)
+        if name_lower.startswith(term_lower):
+            return (1, name_lower)
+        return (2, name_lower)
+
+    matches.sort(key=_relevance)
+    return _to_json(matches[:max_results])
+
+
 def summarize_dataframe(
     dataframe: pd.DataFrame,
     *,
@@ -1164,6 +1278,92 @@ def quick_chart(
         "chart_type": chart_type,
         "row_count": int(len(dataframe)),
     }
+    return _to_json(payload)
+
+
+@mcp.tool()
+def generate_data_dictionary(
+    connection_name: str,
+    connections_dir: str = DEFAULT_CONNECTIONS_DIR,
+    output_path: str = "",
+) -> str:
+    """Generate a data dictionary YAML from live schema inspection.
+
+    Queries MDSCHEMA_MEASUREGROUPS, MDSCHEMA_MEASURES, and
+    MDSCHEMA_DIMENSIONS to discover tables and measures, then builds a
+    DataDictionary scaffold with empty descriptions for the user to fill in.
+
+    Required parameters: connection_name.
+    Optional parameters: connections_dir, output_path — when provided the
+    YAML is written to disk.
+
+    Returns JSON with yaml_content, table_count, measure_count, and
+    file_path (when output_path is given).
+    """
+    connection = _get_connection(connection_name, connections_dir)
+    conn_str = connection.connection_string
+
+    schema_queries = {
+        "measuregroups": "SELECT * FROM $SYSTEM.MDSCHEMA_MEASUREGROUPS",
+        "measures": "SELECT * FROM $SYSTEM.MDSCHEMA_MEASURES",
+        "dimensions": "SELECT * FROM $SYSTEM.MDSCHEMA_DIMENSIONS",
+    }
+
+    raw: dict[str, pd.DataFrame] = {}
+    for key, query in schema_queries.items():
+        try:
+            raw[key] = dax_to_pandas(
+                dax_query=query,
+                conn_str=conn_str,
+                connection_timeout_seconds=connection.connection_timeout_seconds,
+                command_timeout_seconds=connection.command_timeout_seconds,
+            )
+        except DAXExecutionError as exc:
+            raise execution_failed(query, exc) from exc
+
+    # Build tables from MDSCHEMA_DIMENSIONS
+    tables: list[TableDef] = []
+    if "dimensions" in raw:
+        dim_df = raw["dimensions"]
+        dim_name_col = "DIMENSION_NAME"
+        if dim_name_col in dim_df.columns:
+            for dim_name in dim_df[dim_name_col].unique():
+                tables.append(TableDef(name=str(dim_name), description=""))
+
+    # Build measures from MDSCHEMA_MEASURES
+    measures: list[MeasureDef] = []
+    if "measures" in raw:
+        meas_df = raw["measures"]
+        name_col = "MEASURE_NAME"
+        unique_col = "MEASURE_UNIQUE_NAME"
+        if name_col in meas_df.columns:
+            for _, row in meas_df.iterrows():
+                expression = str(row.get(unique_col, "")) if unique_col in meas_df.columns else ""
+                measures.append(
+                    MeasureDef(name=str(row[name_col]), expression=expression, description="")
+                )
+
+    dd = DataDictionary(version="1.0", tables=tables, measures=measures, filters=[])
+
+    yaml_content = yaml.dump(
+        dd.model_dump(exclude_defaults=False),
+        default_flow_style=False,
+        sort_keys=False,
+        allow_unicode=True,
+    )
+
+    payload: dict[str, Any] = {
+        "yaml_content": yaml_content,
+        "table_count": len(tables),
+        "measure_count": len(measures),
+    }
+
+    if output_path:
+        out = Path(output_path)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        save_data_dictionary(dd, out)
+        payload["file_path"] = str(out)
+
     return _to_json(payload)
 
 
