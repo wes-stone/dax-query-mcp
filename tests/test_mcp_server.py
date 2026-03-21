@@ -134,7 +134,9 @@ description: "Sales model"
 
     assert "| Month | Revenue |" in payload["markdown_table"]
     assert "| Month | Revenue |" in payload["response_markdown"]
-    assert markdown_only.startswith("### Query preview for `sales`")
+    assert "next_steps" in payload
+    assert len(payload["next_steps"]) == 5
+    assert "### Query preview for `sales`" in markdown_only
 
 
 def test_query_builder_schema_and_error_guidance() -> None:

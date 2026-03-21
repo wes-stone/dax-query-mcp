@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp.exceptions import ToolError
 
 from .connections import load_connections, resolve_connections_dir
 from .executor import dax_to_pandas
@@ -32,17 +34,82 @@ _ROWSET_COLUMNS: dict[str, list[str]] = {
     "measures": ["CUBE_NAME", "MEASURE_NAME", "DESCRIPTION"],
 }
 
-mcp = FastMCP("dax-query-server")
+_ADMIN_QUERY_PATTERNS = re.compile(
+    r"""
+      \bINFO\s*\.               # INFO.*() DMV functions
+    | \$SYSTEM\.DISCOVER_       # $SYSTEM.DISCOVER_* DMV rowsets
+    | \bDBCC\b                  # DBCC commands
+    | \bALTER\b                 # DDL: ALTER
+    | \bCREATE\b                # DDL: CREATE
+    | \bDELETE\b                # DDL: DELETE
+    | \bDROP\b                  # DDL: DROP
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+_SAFE_SYSTEM_PREFIXES = (
+    "$SYSTEM.MDSCHEMA_",
+)
+
+_NEXT_STEPS = [
+    "Filter / refine — narrow to a specific account, TPID, or time range",
+    "Aggregate — total by month, by account, etc.",
+    "Export as CSV — save results to a CSV file",
+    "Save to DAX Studio — save as a .dax query builder file (I will ask you where to save)",
+    "Scaffold Python workspace — export to a standalone Python project (I will ask you where to save)",
+]
+
+_SERVER_INSTRUCTIONS = """\
+You are connected to the dax-query-server, which runs DAX queries against \
+Power BI / Analysis Services semantic models.
+
+RULES — follow these every time:
+
+1. ALWAYS EXECUTE queries — when the user asks for a DAX query or example, \
+do NOT just show the query text and ask if they want to run it. Build the \
+query AND run it with run_connection_query in the same turn so the user \
+sees both the query and the resulting data table.
+
+2. After EVERY query result, you MUST render the markdown_table field as an \
+actual markdown table for the user. Do NOT summarize, paraphrase, or describe \
+the data in words — SHOW THE TABLE. Then render the next_steps list as a \
+numbered markdown list. This is mandatory on every single query response.
+
+3. NEVER generate admin-required queries: INFO.*(), $SYSTEM.DISCOVER_*, \
+DBCC, ALTER, CREATE, DELETE, or DROP. They will be rejected. Use \
+get_connection_context or inspect_connection for metadata instead.
+
+4. Before writing any DAX query, call get_connection_context to learn the \
+available tables, columns, measures, and filters for the connection.
+"""
+
+mcp = FastMCP("dax-query-server", instructions=_SERVER_INSTRUCTIONS)
+
+
+def validate_dax_query(query: str) -> None:
+    """Reject queries that require admin privileges or perform DDL.
+
+    Allows safe $SYSTEM.MDSCHEMA_* rowsets used by inspect_connection.
+    Raises ToolError with a helpful message so the LLM can self-correct.
+    """
+    upper = query.strip().upper()
+    for prefix in _SAFE_SYSTEM_PREFIXES:
+        if prefix.upper() in upper:
+            return
+
+    if _ADMIN_QUERY_PATTERNS.search(query):
+        raise ToolError(
+            "This query uses admin-required syntax (INFO.*(), $SYSTEM.DISCOVER_*, "
+            "DBCC, ALTER, CREATE, DELETE, or DROP) which will fail without admin "
+            "privileges. Use get_connection_context to discover tables, columns, "
+            "and measures instead."
+        )
 
 
 @mcp.tool()
 def list_connections(connections_dir: str = DEFAULT_CONNECTIONS_DIR) -> str:
-    """List the configured semantic model connections.
-
-    When a connection has has_context_markdown=true, call get_connection_context
-    to read its curated column/measure/filter documentation BEFORE writing
-    any DAX queries. Do NOT use INFO.*() or $SYSTEM queries for metadata —
-    they require admin privileges.
+    """List configured connections. Call get_connection_context on any connection
+    with has_context_markdown=true before writing DAX queries.
     """
     connections = load_connections(connections_dir)
     payload = {
@@ -68,16 +135,10 @@ def get_connection_context(
     connection_name: str,
     connections_dir: str = DEFAULT_CONNECTIONS_DIR,
 ) -> str:
-    """Return metadata and markdown context for a named connection.
+    """Return metadata and curated markdown context for a named connection.
 
-    IMPORTANT: This is the PRIMARY way to discover tables, columns, measures,
-    and filters for a connection. The context_markdown field contains a curated
-    description of the semantic model — use it INSTEAD of running INFO.*() or
-    $SYSTEM.DISCOVER_* queries, which require admin privileges and will fail
-    for most users.
-
-    Always call this FIRST when you need to know what columns or measures
-    are available before writing a DAX query.
+    This is the PRIMARY way to discover tables, columns, measures, and filters.
+    Always call this FIRST before writing any DAX query.
     """
     connection = _get_connection(connection_name, connections_dir)
     payload = {
@@ -87,6 +148,12 @@ def get_connection_context(
         "suggested_skill_reason": connection.suggested_skill_reason,
         "context_path": connection.context_path,
         "context_markdown": connection.context_markdown,
+        "NEXT_ACTION": (
+            "You now have the schema. Compose a DAX query AND immediately "
+            "execute it using run_connection_query in the SAME turn. "
+            "Do NOT just display the query text to the user — run it so "
+            "they see the actual data table."
+        ),
     }
     return _to_json(payload)
 
@@ -99,16 +166,12 @@ def run_connection_query(
     preview_rows: int = DEFAULT_PREVIEW_ROWS,
     max_rows: int | None = None,
 ) -> str:
-    """Run an ad hoc DAX query against a named connection and return a preview.
+    """Run a DAX query against a named connection and return a preview.
 
-    IMPORTANT: Do NOT use INFO.*() or $SYSTEM.DISCOVER_* queries — they require
-    admin privileges and will fail. Use get_connection_context to discover
-    available tables, columns, and measures instead.
-
-    When presenting results to the user, render the response_markdown
-    field EXACTLY as-is — including the numbered "What would you like to do next?"
-    list at the end. Do NOT summarize, paraphrase, or omit those options.
+    Present the markdown_table as a table and the next_steps list as a
+    numbered list after every result.
     """
+    validate_dax_query(query)
     connection = _get_connection(connection_name, connections_dir)
     dataframe = dax_to_pandas(
         dax_query=query,
@@ -128,6 +191,7 @@ def run_connection_query(
             title=f"Query preview for `{connection_name}`",
             summary=summary,
         ),
+        "next_steps": _NEXT_STEPS,
         "summary": summary,
     }
     return _to_json(payload)
@@ -141,15 +205,11 @@ def run_connection_query_markdown(
     preview_rows: int = DEFAULT_PREVIEW_ROWS,
     max_rows: int | None = None,
 ) -> str:
-    """Run an ad hoc DAX query against a named connection and return a ready-to-present markdown preview table.
+    """Run a DAX query and return a ready-to-present markdown preview.
 
-    IMPORTANT: Do NOT use INFO.*() or $SYSTEM.DISCOVER_* queries — they require
-    admin privileges and will fail. Use get_connection_context to discover
-    available tables, columns, and measures instead.
-
-    Render the returned markdown EXACTLY as-is to the user — including the
-    numbered "What would you like to do next?" list. Do NOT summarize or omit those options.
+    Present the returned markdown EXACTLY as-is, including the next_steps list.
     """
+    validate_dax_query(query)
     payload = json.loads(
         run_connection_query(
             connection_name=connection_name,
@@ -228,12 +288,8 @@ def inspect_connection(
 ) -> str:
     """Inspect model metadata using non-admin MDSCHEMA rowsets.
 
-    Prefer get_connection_context first — it returns curated markdown
-    documentation without hitting the server.  Use inspect_connection only
-    when you need live schema discovery beyond what the context provides.
-
-    This tool uses safe $SYSTEM.MDSCHEMA_* rowsets — never INFO.*() or
-    $SYSTEM.DISCOVER_* which require admin privileges.
+    Prefer get_connection_context first — it returns curated documentation
+    without hitting the server. Use this only for live schema discovery.
     """
     return _to_json(
         inspect_connection_metadata(
@@ -315,10 +371,10 @@ def run_named_query(
     config_dir: str = "queries",
     preview_rows: int = DEFAULT_PREVIEW_ROWS,
 ) -> str:
-    """Backward-compatible helper for the older query-centric workflow.
+    """Run a pre-configured named query and return a preview.
 
-    IMPORTANT: Render response_markdown EXACTLY as-is to the user — including the
-    numbered "What would you like to do next?" list. Do NOT summarize or omit those options.
+    Present the markdown_table as a table and the next_steps list as a
+    numbered list after every result.
     """
     from .pipeline import DAXPipeline
 
@@ -337,6 +393,7 @@ def run_named_query(
             title=f"Query preview for `{query_name}`",
             summary=summary,
         ),
+        "next_steps": _NEXT_STEPS,
         "summary": summary,
     }
     return _to_json(payload)
@@ -350,15 +407,12 @@ def run_ad_hoc_query(
     command_timeout_seconds: int = 1800,
     max_rows: int | None = None,
 ) -> str:
-    """Run an ad hoc DAX query against a raw connection string.
+    """Run a DAX query against a raw connection string.
 
-    IMPORTANT: Do NOT use INFO.*() or $SYSTEM.DISCOVER_* queries — they require
-    admin privileges and will fail. Use get_connection_context (for named
-    connections) or inspect_connection to discover model metadata instead.
-
-    Render response_markdown EXACTLY as-is to the user — including the
-    numbered "What would you like to do next?" list. Do NOT summarize or omit those options.
+    Present the markdown_table as a table and the next_steps list as a
+    numbered list after every result.
     """
+    validate_dax_query(query)
     dataframe = dax_to_pandas(
         dax_query=query,
         conn_str=connection_string,
@@ -373,6 +427,7 @@ def run_ad_hoc_query(
             title="Query preview",
             summary=summary,
         ),
+        "next_steps": _NEXT_STEPS,
         "summary": summary,
     }
     return _to_json(payload)
@@ -447,9 +502,17 @@ def summarize_rowset(
     }
 
 
+_RENDER_DIRECTIVE = (
+    "[RENDER INSTRUCTIONS: Display the markdown table below EXACTLY as-is. "
+    "Do NOT summarize, paraphrase, or describe the data — show the actual table. "
+    "After the table, show the numbered next-steps list EXACTLY as written.]\n\n"
+)
+
+
 def _build_query_response_markdown(*, title: str, summary: dict[str, Any]) -> str:
     column_count = summary.get("column_count", len(summary.get("columns", [])))
     return (
+        f"{_RENDER_DIRECTIVE}"
         f"### {title}\n\n"
         f"- Rows: {summary['row_count']}\n"
         f"- Columns: {column_count}\n\n"
@@ -518,6 +581,35 @@ def _get_connection(connection_name: str, connections_dir: str) -> Any:
 
 
 def main() -> None:
+    import sys
+
+    if "--help" in sys.argv or "-h" in sys.argv:
+        print(
+            "dax-query-server — MCP server for DAX queries\n\n"
+            "This is a stdio-based MCP server. It is NOT meant to be run directly.\n\n"
+            "Usage:\n"
+            "  Configure your MCP client (e.g., Copilot) to launch this server.\n\n"
+            "Example mcp-config.json entry:\n"
+            '  {\n'
+            '    "mcpServers": {\n'
+            '      "dax-query-server": {\n'
+            '        "command": "uvx",\n'
+            '        "args": ["--from", "C:\\\\path\\\\to\\\\dax-query-mcp", "dax-query-server"],\n'
+            '        "env": {\n'
+            '          "DAX_QUERY_MCP_CONNECTIONS_DIR": "C:\\\\path\\\\to\\\\Connections"\n'
+            '        }\n'
+            '      }\n'
+            '    }\n'
+            '  }\n\n'
+            "Available tools:\n"
+            "  list_connections       — list configured semantic model connections\n"
+            "  get_connection_context — get metadata and markdown context for a connection\n"
+            "  run_connection_query   — run a DAX query against a named connection\n"
+            "  inspect_connection     — inspect model metadata via MDSCHEMA rowsets\n"
+            "  scaffold_dax_workspace — scaffold a portable Python workspace\n"
+        )
+        sys.exit(0)
+
     mcp.run(transport="stdio")
 
 
