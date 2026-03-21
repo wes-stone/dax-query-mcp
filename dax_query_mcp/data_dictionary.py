@@ -77,3 +77,17 @@ def save_data_dictionary(dd: DataDictionary, path: str | Path) -> None:
             sort_keys=False,
             allow_unicode=True,
         )
+
+
+def find_data_dictionary(
+    connection_name: str,
+    connections_dir: str | Path,
+) -> DataDictionary | None:
+    """Look for ``{connection_name}.data_dictionary.yaml`` in *connections_dir*.
+
+    Returns the parsed :class:`DataDictionary` if the file exists, otherwise ``None``.
+    """
+    path = Path(connections_dir) / f"{connection_name}.data_dictionary.yaml"
+    if not path.is_file():
+        return None
+    return load_data_dictionary(path)

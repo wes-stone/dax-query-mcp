@@ -14,6 +14,7 @@ from dax_query_mcp.data_dictionary import (
     FilterDef,
     MeasureDef,
     TableDef,
+    find_data_dictionary,
     load_data_dictionary,
     save_data_dictionary,
 )
@@ -180,3 +181,25 @@ class TestSampleFile:
         save_data_dictionary(dd, out)
         reloaded = load_data_dictionary(out)
         assert reloaded == dd
+
+
+# ── find_data_dictionary tests ────────────────────────────────────────────────
+
+
+class TestFindDataDictionary:
+    CONNECTIONS_DIR = Path(__file__).resolve().parent.parent / "Connections"
+
+    def test_finds_existing_file(self):
+        dd = find_data_dictionary("mock_contoso", str(self.CONNECTIONS_DIR))
+        assert dd is not None
+        assert isinstance(dd, DataDictionary)
+        assert dd.version == "1.0"
+        assert len(dd.tables) == 3
+
+    def test_returns_none_for_missing_file(self):
+        dd = find_data_dictionary("nonexistent_connection", str(self.CONNECTIONS_DIR))
+        assert dd is None
+
+    def test_returns_none_for_missing_dir(self, tmp_path: Path):
+        dd = find_data_dictionary("anything", str(tmp_path / "does_not_exist"))
+        assert dd is None

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -11,6 +12,7 @@ import pandas as pd
 from mcp.server.fastmcp import FastMCP
 
 from .connections import load_connections, resolve_connections_dir
+from .data_dictionary import find_data_dictionary
 from .errors import (
     admin_query_blocked,
     connection_not_found,
@@ -28,6 +30,7 @@ from .query_builder import (
     query_builder_to_payload,
     save_query_builder_artifacts,
 )
+from .data_dictionary import DataDictionary, load_data_dictionary
 from .scaffold import scaffold_workspace
 
 DEFAULT_CONNECTIONS_DIR = str(resolve_connections_dir(os.getenv("DAX_QUERY_MCP_CONNECTIONS_DIR")))
@@ -71,7 +74,7 @@ _SERVER_INSTRUCTIONS = """\
 You are connected to the dax-query-server, which runs DAX queries against \
 Power BI / Analysis Services semantic models.
 
-RULES — follow these every time:
+## Rules — follow these every time
 
 1. ALWAYS EXECUTE queries — when the user asks for a DAX query or example, \
 do NOT just show the query text and ask if they want to run it. Build the \
@@ -89,6 +92,79 @@ get_connection_context or inspect_connection for metadata instead.
 
 4. Before writing any DAX query, call get_connection_context to learn the \
 available tables, columns, measures, and filters for the connection.
+
+## Tool overview — when to use each tool
+
+| Tool | Purpose |
+|---|---|
+| list_connections | Discover available connections. Call first if the user hasn't specified one. |
+| get_connection_context | Get curated schema (tables, columns, measures, filters) for a connection. Call BEFORE writing DAX. |
+| run_connection_query | Execute a DAX query against a named connection and return structured results. Primary query tool. |
+| run_connection_query_markdown | Same as run_connection_query but returns ready-to-render markdown. Use when you only need display output. |
+| run_ad_hoc_query | Execute DAX against a raw connection string (no named connection required). |
+| inspect_connection | Live schema discovery via MDSCHEMA rowsets. Use only when get_connection_context is unavailable or stale. |
+| export_to_csv | Save query results to a timestamped CSV file. |
+| copy_to_clipboard | Copy query results to the system clipboard (TSV for Excel, markdown for docs). |
+| save_query_builder | Persist a structured query as .dax + .dax.queryBuilder artifacts. Always call get_query_builder_schema first. |
+| get_query_builder_schema | Get the expected JSON shape for save_query_builder. |
+| get_query_builder | Load a previously saved query builder definition. |
+| scaffold_dax_workspace | Create a standalone Python project with run_query.py, notebook, and pyproject.toml. |
+
+## DAX best practices
+
+- Always start queries with EVALUATE. Every DAX query must return a table.
+- Use SUMMARIZECOLUMNS or SUMMARIZE for aggregations instead of raw table scans.
+- Use TOPN to limit large result sets: `EVALUATE TOPN(100, 'Table')`.
+- Wrap scalar expressions in ROW: `EVALUATE ROW("Label", [Measure])`.
+- Quote table names with single quotes and column names with square brackets: `'Sales'[Revenue]`.
+- Prefer measures already defined in the model over writing inline CALCULATE expressions.
+
+Good query examples:
+  EVALUATE SUMMARIZECOLUMNS('Calendar'[Month], "Revenue", SUM('Sales'[Amount]))
+  EVALUATE TOPN(10, 'Products', 'Products'[Sales], DESC)
+  EVALUATE ROW("Total Revenue", [Total Revenue])
+
+Bad query examples (avoid these):
+  SELECT * FROM Sales           -- SQL, not DAX
+  EVALUATE Sales                -- returns entire table; add TOPN or filters
+  INFO.STORAGETABLECOLUMNS()    -- admin query; use get_connection_context instead
+  EVALUATE FILTER(ALL('Huge'), …) -- scanning all rows; add specific filters first
+
+## Common patterns
+
+1. Schema-first workflow: call get_connection_context → read tables/columns/measures → compose query → run_connection_query.
+2. Data dictionary: if has_context_markdown=true on a connection, get_connection_context returns curated docs. Prefer this over inspect_connection.
+3. Iterative refinement: run a broad query first, then add filters/aggregations based on results.
+4. Profiling: set profile=true on run_connection_query or run_ad_hoc_query to get per-phase timing. Use this to identify slow queries before optimizing.
+
+## Error codes and recovery
+
+| Error code | Meaning | Recovery action |
+|---|---|---|
+| ADMIN_QUERY_BLOCKED | Query uses forbidden admin syntax (INFO, DBCC, ALTER, etc.) | Rewrite using EVALUATE or call get_connection_context for metadata. |
+| CONNECTION_NOT_FOUND | The named connection does not exist in the connections directory. | Call list_connections to see available names and retry. |
+| QUERY_TIMEOUT | Query exceeded the configured timeout. | Simplify the query, add filters, reduce the result set, or increase command_timeout_seconds. |
+| EXECUTION_FAILED | DAX syntax error or server-side failure. | Check table/column names with get_connection_context, fix syntax, and retry. |
+| INVALID_PARAMS | Missing or invalid tool parameters. | Read the suggestion field in the error payload and correct the call. |
+
+## Follow-up options after query results
+
+After every successful query, offer these follow-up actions:
+1. Filter / refine — narrow to specific accounts, dates, or segments.
+2. Aggregate — total by month, by account, by product, etc.
+3. Export as CSV — use export_to_csv to save results to a file.
+4. Copy to clipboard — use copy_to_clipboard (TSV for Excel, markdown for docs).
+5. Save to DAX Studio — use save_query_builder to persist as .dax artifacts.
+6. Scaffold Python workspace — use scaffold_dax_workspace to create a standalone project.
+7. Generate charts — suggest the user can visualize the exported data.
+
+## Performance tips
+
+- Always filter before aggregating to minimize data scanned.
+- Use TOPN to preview large tables before pulling full results.
+- Enable profiling (profile=true) to see connection, execution, and serialization timings.
+- If a query times out, break it into smaller queries or add date/category filters.
+- Prefer pre-defined measures over complex inline CALCULATE expressions; the engine optimizes them better.
 """
 
 mcp = FastMCP("dax-query-server", instructions=_SERVER_INSTRUCTIONS)
@@ -159,6 +235,100 @@ def get_connection_context(
             "they see the actual data table."
         ),
     }
+    return _to_json(payload)
+
+
+@mcp.tool()
+def get_data_dictionary(
+    connection_name: str,
+    connections_dir: str = DEFAULT_CONNECTIONS_DIR,
+) -> str:
+    """Return the data dictionary for a named connection as JSON.
+
+    The data dictionary describes tables, columns, measures, and filters
+    with human-readable descriptions and sample values.
+    """
+    dd = find_data_dictionary(connection_name, connections_dir)
+    if dd is None:
+        return _to_json({
+            "connection_name": connection_name,
+            "found": False,
+            "message": (
+                f"No data dictionary found for '{connection_name}'. "
+                f"Create a file named '{connection_name}.data_dictionary.yaml' "
+                f"in the connections directory to add one."
+            ),
+        })
+    return _to_json({
+        "connection_name": connection_name,
+        "found": True,
+        "data_dictionary": dd.model_dump(),
+    })
+
+
+@mcp.tool()
+def get_schema(
+    connection_name: str,
+    connections_dir: str = DEFAULT_CONNECTIONS_DIR,
+) -> str:
+    """Return schema information for a connection, enriched with data
+    dictionary descriptions when available.
+
+    If a data dictionary file exists for the connection, the response
+    includes table, column, measure, and filter descriptions.  Otherwise
+    a basic payload is returned suggesting ``inspect_connection`` for
+    live schema discovery.
+    """
+    connection = _get_connection(connection_name, connections_dir)
+    dd = find_data_dictionary(connection_name, connections_dir)
+
+    payload: dict[str, Any] = {
+        "connection_name": connection_name,
+        "description": connection.description,
+        "has_data_dictionary": dd is not None,
+    }
+
+    if dd is not None:
+        payload["tables"] = [
+            {
+                "name": t.name,
+                "description": t.description,
+                "columns": [
+                    {
+                        "name": c.name,
+                        "data_type": c.data_type,
+                        "description": c.description,
+                        "sample_values": c.sample_values,
+                    }
+                    for c in t.columns
+                ],
+            }
+            for t in dd.tables
+        ]
+        payload["measures"] = [
+            {
+                "name": m.name,
+                "expression": m.expression,
+                "description": m.description,
+                "format_string": m.format_string,
+            }
+            for m in dd.measures
+        ]
+        payload["filters"] = [
+            {
+                "name": f.name,
+                "column": f.column,
+                "description": f.description,
+                "suggested_values": f.suggested_values,
+            }
+            for f in dd.filters
+        ]
+    else:
+        payload["message"] = (
+            "No data dictionary found. Use inspect_connection for live schema "
+            "discovery, or create a data dictionary file."
+        )
+
     return _to_json(payload)
 
 
@@ -504,6 +674,107 @@ def inspect_model_metadata(
     return _to_json(results)
 
 
+@mcp.tool()
+def search_columns(
+    connection_name: str,
+    search_term: str,
+    connections_dir: str = DEFAULT_CONNECTIONS_DIR,
+    max_results: int = 20,
+) -> str:
+    """Fuzzy-search columns across all tables for a connection.
+
+    Searches column names (case-insensitive substring match) and also
+    column descriptions when a data dictionary exists.  Returns a JSON
+    array sorted by relevance: exact match > starts-with > contains.
+    """
+    connection = _get_connection(connection_name, connections_dir)
+
+    # Try to load data dictionary (connection_name.data_dictionary.yaml)
+    dd: DataDictionary | None = None
+    dd_path = Path(resolve_connections_dir(connections_dir)) / f"{connection_name}.data_dictionary.yaml"
+    if dd_path.exists():
+        dd = load_data_dictionary(dd_path)
+
+    # Build description lookup from data dictionary
+    desc_lookup: dict[tuple[str, str], str] = {}
+    dd_type_lookup: dict[tuple[str, str], str] = {}
+    if dd is not None:
+        for table in dd.tables:
+            for col in table.columns:
+                desc_lookup[(table.name, col.name)] = col.description
+                dd_type_lookup[(table.name, col.name)] = col.data_type
+
+    matches: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    term_lower = search_term.lower()
+
+    # 1. Search data dictionary columns (primary source when available)
+    if dd is not None:
+        for table in dd.tables:
+            for col in table.columns:
+                col_lower = col.name.lower()
+                desc_lower = col.description.lower() if col.description else ""
+                if term_lower in col_lower or term_lower in desc_lower:
+                    matches.append({
+                        "table": table.name,
+                        "column": col.name,
+                        "data_type": col.data_type,
+                        "description": col.description or "",
+                    })
+                    seen.add((table.name, col.name))
+
+    # 2. Supplement with live MDSCHEMA schema (columns not already found)
+    try:
+        dataframe = dax_to_pandas(
+            dax_query=(
+                "SELECT DIMENSION_UNIQUE_NAME, HIERARCHY_UNIQUE_NAME, "
+                "LEVEL_NAME, DESCRIPTION "
+                "FROM $SYSTEM.MDSCHEMA_LEVELS"
+            ),
+            conn_str=connection.connection_string,
+            connection_timeout_seconds=connection.connection_timeout_seconds,
+            command_timeout_seconds=connection.command_timeout_seconds,
+        )
+        for _, row in dataframe.iterrows():
+            dim_name = str(row.get("DIMENSION_UNIQUE_NAME", ""))
+            col_name = str(row.get("LEVEL_NAME", ""))
+            schema_desc = str(row.get("DESCRIPTION", "") or "")
+            table_name = dim_name.strip("[]")
+
+            if (table_name, col_name) in seen:
+                continue
+
+            col_lower = col_name.lower()
+            desc_lower = schema_desc.lower()
+            dd_desc = desc_lookup.get((table_name, col_name), "")
+            dd_desc_lower = dd_desc.lower()
+
+            if term_lower in col_lower or term_lower in desc_lower or term_lower in dd_desc_lower:
+                data_type = dd_type_lookup.get((table_name, col_name), "")
+                description = dd_desc or schema_desc
+                matches.append({
+                    "table": table_name,
+                    "column": col_name,
+                    "data_type": data_type,
+                    "description": description,
+                })
+                seen.add((table_name, col_name))
+    except Exception:
+        pass
+
+    # Sort by relevance: exact > starts-with > contains
+    def _relevance(m: dict[str, Any]) -> tuple[int, str]:
+        col_lower = m["column"].lower()
+        if col_lower == term_lower:
+            return (0, col_lower)
+        if col_lower.startswith(term_lower):
+            return (1, col_lower)
+        return (2, col_lower)
+
+    matches.sort(key=_relevance)
+    return _to_json(matches[:max_results])
+
+
 def summarize_dataframe(
     dataframe: pd.DataFrame,
     *,
@@ -661,6 +932,80 @@ def scaffold_dax_workspace(
 
 
 @mcp.tool()
+def scaffold_streamlit_app(
+    connection_name: str,
+    query: str,
+    title: str = "DAX Query Results",
+    output_path: str = "",
+) -> str:
+    """Generate a Streamlit Python app for visualizing DAX query results.
+
+    Creates a standalone .py file that uses Streamlit to display a data table
+    and an optional bar chart for numeric columns.
+
+    Parameters:
+        connection_name: Name of the DAX connection (embedded in the generated app).
+        query: The DAX query to embed in the generated app.
+        title: Page title shown in the Streamlit app.
+        output_path: If provided, write the generated code to this file path.
+    """
+    import textwrap
+
+    code = textwrap.dedent(f'''\
+        """Streamlit app for visualizing DAX query results.
+
+        Run with: streamlit run {output_path or "app.py"}
+        """
+
+        import streamlit as st
+        import pandas as pd
+
+        st.set_page_config(page_title={title!r}, layout="wide")
+        st.title({title!r})
+
+        CONNECTION_NAME = {connection_name!r}
+        DAX_QUERY = {query!r}
+
+        st.subheader("DAX Query")
+        st.code(DAX_QUERY, language="dax")
+
+        # -- Replace this section with live query execution if desired --
+        # from dax_query_mcp.executor import dax_to_pandas
+        # df = dax_to_pandas(dax_query=DAX_QUERY, conn_str="YOUR_CONNECTION_STRING")
+        st.info(
+            f"Connection: **{{CONNECTION_NAME}}** — "
+            "replace the sample DataFrame below with a live call to dax_to_pandas()."
+        )
+        df = pd.DataFrame({{"Column": ["sample"], "Value": [0]}})
+        # -- End sample section --
+
+        st.subheader("Data")
+        st.dataframe(df, use_container_width=True)
+
+        numeric_cols = df.select_dtypes(include="number").columns.tolist()
+        if numeric_cols:
+            st.subheader("Chart")
+            st.bar_chart(df[numeric_cols])
+    ''')
+
+    payload: dict[str, Any] = {
+        "code": code,
+        "instructions": (
+            f"Run the app with: streamlit run "
+            f"{output_path or 'app.py'}"
+        ),
+    }
+
+    if output_path:
+        out = Path(output_path)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(code, encoding="utf-8")
+        payload["file_path"] = str(out)
+
+    return _to_json(payload)
+
+
+@mcp.tool()
 def export_to_csv(
     connection_name: str,
     query: str,
@@ -701,6 +1046,123 @@ def export_to_csv(
         "file_path": str(file_path),
         "row_count": int(len(dataframe)),
         "column_count": int(len(dataframe.columns)),
+    }
+    return _to_json(payload)
+
+
+@mcp.tool()
+def scaffold_power_query(
+    connection_name: str,
+    query: str,
+    table_name: str = "DAXResults",
+    connections_dir: str = DEFAULT_CONNECTIONS_DIR,
+) -> str:
+    """Generate Power Query M code for importing DAX query results into Excel.
+
+    Returns JSON with the generated M code, table name, and paste instructions.
+    """
+    validate_dax_query(query)
+    connection = _get_connection(connection_name, connections_dir)
+    conn_str = connection.connection_string.strip()
+
+    escaped_query = query.replace('"', '""')
+
+    m_code = (
+        "let\n"
+        "    // Step 1 — Connect to Analysis Services\n"
+        f'    Source = AnalysisServices.Database("{conn_str}"),\n'
+        "\n"
+        "    // Step 2 — Run the DAX query\n"
+        f'    Result = Value.NativeQuery(Source, "{escaped_query}")\n'
+        "in\n"
+        "    // Step 3 — Return the result table\n"
+        "    Result"
+    )
+
+    payload = {
+        "m_code": m_code,
+        "table_name": table_name,
+        "instructions": (
+            "1. Open Excel and go to the Data tab.\n"
+            "2. Click 'Get Data' > 'From Other Sources' > 'Blank Query'.\n"
+            "3. In the Power Query Editor, click 'Advanced Editor'.\n"
+            "4. Replace the contents with the M code above.\n"
+            "5. Click 'Done', then 'Close & Load'.\n"
+            f"6. Rename the resulting table to '{table_name}'."
+        ),
+    }
+    return _to_json(payload)
+
+
+@mcp.tool()
+def quick_chart(
+    connection_name: str,
+    query: str,
+    chart_type: str,
+    x_column: str,
+    y_column: str,
+    output_path: str = "",
+    connections_dir: str = DEFAULT_CONNECTIONS_DIR,
+    max_rows: int | None = None,
+) -> str:
+    """Generate a chart (bar, line, or pie) from DAX query results.
+
+    Returns JSON with file_path, chart_type, and row_count.
+    If output_path is not provided, the chart is saved to a temp file.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    valid_types = ("bar", "line", "pie")
+    if chart_type not in valid_types:
+        raise invalid_params(f"chart_type must be one of {valid_types}, got '{chart_type}'")
+
+    validate_dax_query(query)
+    connection = _get_connection(connection_name, connections_dir)
+    try:
+        dataframe = dax_to_pandas(
+            dax_query=query,
+            conn_str=connection.connection_string,
+            connection_timeout_seconds=connection.connection_timeout_seconds,
+            command_timeout_seconds=connection.command_timeout_seconds,
+            max_rows=max_rows or connection.max_rows,
+        )
+    except DAXExecutionError as exc:
+        if "timeout" in str(exc).lower() or "timed out" in str(exc).lower():
+            raise query_timeout(query, connection.command_timeout_seconds, exc) from exc
+        raise execution_failed(query, exc) from exc
+
+    for col in (x_column, y_column):
+        if col not in dataframe.columns:
+            raise invalid_params(
+                f"Column '{col}' not found in query results. "
+                f"Available columns: {list(dataframe.columns)}"
+            )
+
+    fig, ax = plt.subplots()
+    if chart_type == "bar":
+        ax.bar(dataframe[x_column].astype(str), dataframe[y_column])
+    elif chart_type == "line":
+        ax.plot(dataframe[x_column], dataframe[y_column])
+    elif chart_type == "pie":
+        ax.pie(dataframe[y_column], labels=dataframe[x_column].astype(str), autopct="%1.1f%%")
+    ax.set_title(f"{y_column} by {x_column}")
+
+    if output_path:
+        out = Path(output_path)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        file_path = str(out)
+    else:
+        file_path = tempfile.mktemp(suffix=".png", prefix="quick_chart_")
+
+    plt.savefig(file_path)
+    plt.close(fig)
+
+    payload = {
+        "file_path": file_path,
+        "chart_type": chart_type,
+        "row_count": int(len(dataframe)),
     }
     return _to_json(payload)
 
