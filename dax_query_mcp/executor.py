@@ -35,7 +35,10 @@ def dax_to_pandas(
     command_timeout_seconds: int = 1800,
     max_rows: int | None = None,
 ) -> pd.DataFrame:
-    """Execute an ad hoc DAX query and return a DataFrame."""
+    """Execute an ad hoc DAX query and return a DataFrame.
+
+    If conn_str starts with MOCK://, uses the mock cube dispatcher for testing.
+    """
     config = DAXQueryConfig(
         name="adhoc_query",
         connection_string=conn_str,
@@ -44,7 +47,7 @@ def dax_to_pandas(
         command_timeout_seconds=command_timeout_seconds,
         max_rows=max_rows,
     )
-    return DAXExecutor().execute(config)
+    return DAXExecutor(connection_string=conn_str).execute(config)
 
 
 def redact_connection_string(connection_string: str) -> str:
@@ -68,8 +71,13 @@ def redact_connection_string(connection_string: str) -> str:
 class DAXExecutor:
     """Reusable ADODB-backed DAX executor."""
 
-    def __init__(self, dispatcher: DispatchFn | None = None):
-        self._dispatcher = dispatcher or _default_dispatcher()
+    def __init__(self, dispatcher: DispatchFn | None = None, connection_string: str | None = None):
+        if dispatcher is not None:
+            self._dispatcher = dispatcher
+        elif connection_string is not None:
+            self._dispatcher = get_dispatcher_for_connection(connection_string)
+        else:
+            self._dispatcher = _default_dispatcher()
 
     def execute(self, query: DAXQueryConfig) -> pd.DataFrame:
         conn = None
@@ -120,6 +128,19 @@ def _default_dispatcher() -> DispatchFn:
         ) from exc
 
     return win32com.client.Dispatch
+
+
+def get_dispatcher_for_connection(connection_string: str) -> DispatchFn:
+    """Return the appropriate dispatcher for a connection string.
+
+    If the connection string starts with MOCK://, returns a mock dispatcher
+    for testing and remote development. Otherwise returns the real COM dispatcher.
+    """
+    from .mock_cube import create_mock_dispatcher, is_mock_connection
+
+    if is_mock_connection(connection_string):
+        return create_mock_dispatcher()
+    return _default_dispatcher()
 
 
 def _iter_recordset_rows(

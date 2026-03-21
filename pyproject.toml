@@ -30,6 +30,9 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "ai_integration: AI-in-the-loop tests using Copilot SDK (require Copilot CLI running)",
+]
 
 [tool.setuptools.packages.find]
 include = ["dax_query_mcp*"]

@@ -176,11 +176,14 @@ def test_dax_to_pandas_uses_executor_defaults(monkeypatch) -> None:
     captured = {}
 
     class StubExecutor:
+        def __init__(self, **kwargs):
+            pass  # Accept any kwargs from the new signature
+
         def execute(self, query):
             captured["query"] = query
             return pd.DataFrame({"Value": [1]})
 
-    monkeypatch.setattr("dax_query_mcp.executor.DAXExecutor", lambda: StubExecutor())
+    monkeypatch.setattr("dax_query_mcp.executor.DAXExecutor", StubExecutor)
 
     dataframe = dax_to_pandas("EVALUATE ROW(\"Value\", 1)", "Provider=MSOLAP.8;Initial Catalog=model")
 
