@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+import time
 
 import pandas as pd
 
@@ -8,21 +9,31 @@ from dax_query_mcp.models import DAXQueryConfig
 
 
 class FakeField:
-    def __init__(self, name: str):
+    def __init__(self, name: str, value: object = None):
         self.Name = name
+        self.Value = value
 
 
 class FakeRecordset:
     def __init__(self, fields: list[str], rows: list[tuple[object, ...]]):
         self.Fields = [FakeField(name) for name in fields]
         self._rows = rows
+        self._index = 0
         self.closed = False
+        self._sync_field_values()
 
-    def GetRows(self, max_rows=None):
-        rows = self._rows if max_rows is None else self._rows[:max_rows]
-        if not rows:
-            return []
-        return [tuple(row[index] for row in rows) for index in range(len(self.Fields))]
+    @property
+    def EOF(self) -> bool:
+        return self._index >= len(self._rows)
+
+    def MoveNext(self) -> None:
+        self._index += 1
+        self._sync_field_values()
+
+    def _sync_field_values(self) -> None:
+        if not self.EOF:
+            for i, field in enumerate(self.Fields):
+                field.Value = self._rows[self._index][i]
 
     def Close(self):
         self.closed = True
@@ -175,4 +186,85 @@ def test_dax_to_pandas_uses_executor_defaults(monkeypatch) -> None:
 
     assert list(dataframe.columns) == ["Value"]
     assert captured["query"].command_timeout_seconds == 1800
+
+
+def _make_executor_and_config(recordset: FakeRecordset, name: str = "test", max_rows: int | None = None):
+    """Helper that wires a FakeRecordset into a DAXExecutor."""
+    connection = FakeConnection()
+    command = FakeCommand(recordset)
+
+    def dispatcher(prog_id: str):
+        if prog_id == "ADODB.Connection":
+            return connection
+        if prog_id == "ADODB.Command":
+            return command
+        raise AssertionError(prog_id)
+
+    executor = DAXExecutor(dispatcher=dispatcher)
+    config = DAXQueryConfig(
+        name=name,
+        connection_string="Provider=MSOLAP.8;Initial Catalog=model",
+        dax_query='EVALUATE ROW("Value", 1)',
+        max_rows=max_rows,
+    )
+    return executor, config
+
+
+def test_streaming_fetch_yields_all_rows() -> None:
+    """Incremental MoveNext iteration must return every row."""
+    num_rows = 50
+    recordset = FakeRecordset(
+        fields=["ID", "Value"],
+        rows=[(i, float(i)) for i in range(num_rows)],
+    )
+    executor, config = _make_executor_and_config(recordset, name="all-rows")
+
+    dataframe = executor.execute(config)
+
+    assert len(dataframe) == num_rows
+    assert list(dataframe.columns) == ["ID", "Value"]
+    assert dataframe["ID"].iloc[0] == 0
+    assert dataframe["ID"].iloc[-1] == num_rows - 1
+
+
+def test_streaming_respects_max_rows() -> None:
+    """max_rows must stop iteration after the requested number of rows."""
+    recordset = FakeRecordset(
+        fields=["ID"],
+        rows=[(i,) for i in range(10)],
+    )
+    executor, config = _make_executor_and_config(recordset, name="max-rows", max_rows=3)
+
+    dataframe = executor.execute(config)
+
+    assert len(dataframe) == 3
+    assert list(dataframe["ID"]) == [0, 1, 2]
+
+
+def test_streaming_empty_recordset_returns_empty_dataframe() -> None:
+    """An empty recordset (EOF at start) must produce an empty DataFrame with correct columns."""
+    recordset = FakeRecordset(fields=["ID", "Label"], rows=[])
+    executor, config = _make_executor_and_config(recordset, name="empty")
+
+    dataframe = executor.execute(config)
+
+    assert len(dataframe) == 0
+    assert list(dataframe.columns) == ["ID", "Label"]
+
+
+def test_streaming_benchmark_mock_recordset() -> None:
+    """Benchmark: incremental MoveNext fetch must complete quickly for a large mock recordset."""
+    num_rows = 10_000
+    recordset = FakeRecordset(
+        fields=["ID", "Amount", "Label"],
+        rows=[(i, float(i) * 1.5, f"row_{i}") for i in range(num_rows)],
+    )
+    executor, config = _make_executor_and_config(recordset, name="benchmark")
+
+    start = time.perf_counter()
+    dataframe = executor.execute(config)
+    elapsed = time.perf_counter() - start
+
+    assert len(dataframe) == num_rows
+    assert elapsed < 2.0, f"Streaming fetch took {elapsed:.2f}s – too slow"
 

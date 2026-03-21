@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from contextlib import suppress
 from datetime import datetime
-from typing import Callable
+from typing import Callable, Iterator
 
 import pandas as pd
 from loguru import logger
@@ -122,19 +122,24 @@ def _default_dispatcher() -> DispatchFn:
     return win32com.client.Dispatch
 
 
+def _iter_recordset_rows(
+    recordset: object, fields: object, num_fields: int, *, max_rows: int | None
+) -> Iterator[list[object]]:
+    """Yield one row at a time from a Recordset using incremental MoveNext()."""
+    count = 0
+    while not recordset.EOF:
+        if max_rows is not None and count >= max_rows:
+            break
+        yield [_strip_timezone(fields[i].Value) for i in range(num_fields)]
+        count += 1
+        recordset.MoveNext()
+
+
 def _recordset_to_dataframe(recordset: object, *, max_rows: int | None) -> pd.DataFrame:
     fields = getattr(recordset, "Fields")
     columns = [field.Name for field in fields]
-    raw_rows = recordset.GetRows(max_rows) if max_rows is not None else recordset.GetRows()
-
-    processed_columns: dict[str, list[object]] = {}
-    for index, column_name in enumerate(columns):
-        values = []
-        if raw_rows and index < len(raw_rows):
-            values = [_strip_timezone(value) for value in raw_rows[index]]
-        processed_columns[column_name] = list(values)
-
-    dataframe = pd.DataFrame(processed_columns)
+    rows = list(_iter_recordset_rows(recordset, fields, len(columns), max_rows=max_rows))
+    dataframe = pd.DataFrame(rows, columns=columns) if rows else pd.DataFrame(columns=columns)
     return _normalize_dataframe(dataframe)
 
 
