@@ -149,7 +149,7 @@ description: "Sales model"
     assert "| Month | Revenue |" in payload["markdown_table"]
     assert "| Month | Revenue |" in payload["response_markdown"]
     assert "next_steps" in payload
-    assert len(payload["next_steps"]) == 5
+    assert len(payload["next_steps"]) == 10
     assert "### Query preview for `sales`" in markdown_only
 
 

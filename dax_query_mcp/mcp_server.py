@@ -66,9 +66,14 @@ _SAFE_SYSTEM_PREFIXES = (
 _NEXT_STEPS = [
     "Filter / refine — narrow to a specific account, TPID, or time range",
     "Aggregate — total by month, by account, etc.",
+    "Copy to clipboard — copy as TSV (paste into Excel) or markdown",
     "Export as CSV — save results to a CSV file",
-    "Save to DAX Studio — save as a .dax query builder file (I will ask you where to save)",
-    "Scaffold Python workspace — export to a standalone Python project (I will ask you where to save)",
+    "Quick chart — generate a bar, line, or pie chart",
+    "Scaffold Power Query — generate Excel Power Query M code",
+    "Scaffold Streamlit — generate a Streamlit dashboard app",
+    "Save to DAX Studio — save as a .dax query builder file",
+    "Scaffold Python — export to a standalone Python project",
+    "Re-run last query — execute the same query again",
 ]
 
 _SERVER_INSTRUCTIONS = """\
