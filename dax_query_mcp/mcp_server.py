@@ -109,12 +109,20 @@ available tables, columns, measures, and filters for the connection.
 | run_connection_query_markdown | Same as run_connection_query but returns ready-to-render markdown. Use when you only need display output. |
 | run_ad_hoc_query | Execute DAX against a raw connection string (no named connection required). |
 | inspect_connection | Live schema discovery via MDSCHEMA rowsets. Use only when get_connection_context is unavailable or stale. |
+| search_columns | Fuzzy search for columns across all tables by name or description. |
+| search_measures | Fuzzy search for measures by name, description, or expression. |
 | export_to_csv | Save query results to a timestamped CSV file. |
 | copy_to_clipboard | Copy query results to the system clipboard (TSV for Excel, markdown for docs). |
+| quick_chart | Generate a bar, line, or pie chart from query results. |
+| scaffold_power_query | Generate Excel Power Query M code to import DAX results. |
+| scaffold_streamlit_app | Generate a Streamlit dashboard app from query results. |
 | save_query_builder | Persist a structured query as .dax + .dax.queryBuilder artifacts. Always call get_query_builder_schema first. |
 | get_query_builder_schema | Get the expected JSON shape for save_query_builder. |
 | get_query_builder | Load a previously saved query builder definition. |
 | scaffold_dax_workspace | Create a standalone Python project with run_query.py, notebook, and pyproject.toml. |
+| get_data_dictionary | Get the data dictionary YAML for a connection (descriptions, measures, filters). |
+| generate_data_dictionary | Generate a data dictionary YAML skeleton from live schema inspection. |
+| rerun_last_query | Re-execute the most recently run query. |
 
 ## DAX best practices
 
@@ -155,14 +163,17 @@ Bad query examples (avoid these):
 
 ## Follow-up options after query results
 
-After every successful query, offer these follow-up actions:
+After every successful query, present the next_steps list and offer these follow-up actions:
 1. Filter / refine — narrow to specific accounts, dates, or segments.
 2. Aggregate — total by month, by account, by product, etc.
-3. Export as CSV — use export_to_csv to save results to a file.
-4. Copy to clipboard — use copy_to_clipboard (TSV for Excel, markdown for docs).
-5. Save to DAX Studio — use save_query_builder to persist as .dax artifacts.
-6. Scaffold Python workspace — use scaffold_dax_workspace to create a standalone project.
-7. Generate charts — suggest the user can visualize the exported data.
+3. Copy to clipboard — use copy_to_clipboard (format="tsv" for Excel, format="markdown" for docs).
+4. Export as CSV — use export_to_csv to save results to a timestamped file.
+5. Quick chart — use quick_chart to generate a bar, line, or pie chart visualization.
+6. Scaffold Power Query — use scaffold_power_query to generate Excel Power Query M code.
+7. Scaffold Streamlit — use scaffold_streamlit_app to generate a dashboard app.
+8. Save to DAX Studio — use save_query_builder to persist as .dax artifacts.
+9. Scaffold Python workspace — use scaffold_dax_workspace to create a standalone project.
+10. Re-run last query — use rerun_last_query to execute the same query again.
 
 ## Performance tips
 
