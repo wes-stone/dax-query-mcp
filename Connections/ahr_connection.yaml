@@ -1,9 +1,0 @@
-connection_string: |
-  Provider=MSOLAP.8;
-  Data Source=AzureHealthReport;
-  Initial Catalog=Azure Health Report
-
-description: "Azure Health Report semantic model - GitHub Copilot usage data"
-command_timeout_seconds: 300
-connection_timeout_seconds: 60
-max_rows: 10000
