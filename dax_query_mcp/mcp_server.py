@@ -949,6 +949,7 @@ _RENDER_DIRECTIVE = (
 
 def _build_query_response_markdown(*, title: str, summary: dict[str, Any]) -> str:
     column_count = summary.get("column_count", len(summary.get("columns", [])))
+    next_steps_md = "\n".join(f"{i+1}. {step}" for i, step in enumerate(_NEXT_STEPS))
     return (
         f"{_RENDER_DIRECTIVE}"
         f"### {title}\n\n"
@@ -957,11 +958,7 @@ def _build_query_response_markdown(*, title: str, summary: dict[str, Any]) -> st
         f"{summary['markdown_table']}\n\n"
         f"---\n\n"
         f"**What would you like to do next?**\n\n"
-        f"1. Filter / refine — narrow to a specific account, TPID, or time range\n"
-        f"2. Aggregate — total by month, by account, etc.\n"
-        f"3. Export as CSV — save results to a CSV file\n"
-        f"4. Save to DAX Studio — save as a .dax query builder file (I will ask you where to save)\n"
-        f"5. Scaffold Python workspace — export to a standalone Python project (I will ask you where to save)\n"
+        f"{next_steps_md}\n"
     )
 
 
