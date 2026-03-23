@@ -31,4 +31,6 @@ class DAXConnectionConfig:
     max_rows: int | None = None
     context_markdown: str | None = None
     context_path: str | None = None
+    overview_markdown: str | None = None
+    overview_path: str | None = None
 

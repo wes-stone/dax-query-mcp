@@ -151,6 +151,9 @@ def _build_connection_config(
     context_path = source.with_suffix(".md")
     context_markdown = context_path.read_text(encoding="utf-8") if context_path.exists() else None
 
+    overview_path = source.parent / f"{connection_name}_overview.md"
+    overview_markdown = overview_path.read_text(encoding="utf-8") if overview_path.exists() else None
+
     return DAXConnectionConfig(
         name=connection_name,
         connection_string=connection_string,
@@ -162,6 +165,8 @@ def _build_connection_config(
         max_rows=max_rows,
         context_markdown=context_markdown,
         context_path=str(context_path) if context_path.exists() else None,
+        overview_markdown=overview_markdown,
+        overview_path=str(overview_path) if overview_path.exists() else None,
     )
 
 

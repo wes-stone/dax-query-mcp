@@ -29,6 +29,7 @@ from dax_query_mcp.mcp_server import (
     scaffold_power_query,
     scaffold_streamlit_app,
     search_columns,
+    search_connection_context,
     search_measures,
     summarize_dataframe,
     summarize_rowset,
@@ -1355,4 +1356,107 @@ def test_export_workstation_dax(tmp_path) -> None:
     # No scaffold files
     assert not (out_dir / "run_queries.py").exists()
     assert not (out_dir / "pyproject.toml").exists()
+
+
+# ── Tiered context tests ───────────────────────────────────────────────
+
+
+def test_get_connection_context_overview_default(tmp_path) -> None:
+    """get_connection_context returns overview by default when available."""
+    connections_dir = tmp_path / "conns"
+    connections_dir.mkdir()
+    (connections_dir / "myconn.yaml").write_text(
+        'connection_string: "Provider=MSOLAP;Data Source=X"\ndescription: "Test"'
+    )
+    (connections_dir / "myconn_overview.md").write_text("# Overview\nKey tables: Sales, Products")
+    (connections_dir / "myconn.md").write_text("# Full Context\n" + "Lots of detail\n" * 100)
+
+    payload = json.loads(get_connection_context("myconn", str(connections_dir)))
+
+    assert payload["detail_level"] == "overview"
+    assert payload["has_overview"] is True
+    assert payload["has_full_context"] is True
+    assert "# Overview" in payload["context_markdown"]
+    assert "Lots of detail" not in payload["context_markdown"]
+    assert "NOTE" in payload
+
+
+def test_get_connection_context_full_detail(tmp_path) -> None:
+    """get_connection_context with detail='full' returns full context."""
+    connections_dir = tmp_path / "conns"
+    connections_dir.mkdir()
+    (connections_dir / "myconn.yaml").write_text(
+        'connection_string: "Provider=MSOLAP;Data Source=X"\ndescription: "Test"'
+    )
+    (connections_dir / "myconn_overview.md").write_text("# Overview\nCompact")
+    (connections_dir / "myconn.md").write_text("# Full Context\nAll the details here")
+
+    payload = json.loads(get_connection_context("myconn", str(connections_dir), detail="full"))
+
+    assert payload["detail_level"] == "full"
+    assert "All the details here" in payload["context_markdown"]
+    assert "NOTE" not in payload
+
+
+def test_get_connection_context_falls_back_to_full(tmp_path) -> None:
+    """When no overview exists, get_connection_context falls back to full context."""
+    connections_dir = tmp_path / "conns"
+    connections_dir.mkdir()
+    (connections_dir / "myconn.yaml").write_text(
+        'connection_string: "Provider=MSOLAP;Data Source=X"\ndescription: "Test"'
+    )
+    (connections_dir / "myconn.md").write_text("# Full Context\nOnly this exists")
+
+    payload = json.loads(get_connection_context("myconn", str(connections_dir)))
+
+    assert payload["has_overview"] is False
+    assert payload["has_full_context"] is True
+    assert "Only this exists" in payload["context_markdown"]
+
+
+def test_search_connection_context(tmp_path) -> None:
+    """search_connection_context finds matching lines."""
+    connections_dir = tmp_path / "conns"
+    connections_dir.mkdir()
+    (connections_dir / "myconn.yaml").write_text(
+        'connection_string: "Provider=MSOLAP;Data Source=X"\ndescription: "Test"'
+    )
+    (connections_dir / "myconn.md").write_text(
+        "# Tables\n## Sales\nRevenue column\n## Products\nCategory column\n## Calendar\nFiscal Month"
+    )
+
+    payload = json.loads(search_connection_context("myconn", "Revenue", str(connections_dir)))
+
+    assert payload["match_count"] >= 1
+    assert any("Revenue" in m["match_line"] for m in payload["matches"])
+
+
+def test_search_connection_context_no_context(tmp_path) -> None:
+    """search_connection_context handles missing context gracefully."""
+    connections_dir = tmp_path / "conns"
+    connections_dir.mkdir()
+    (connections_dir / "myconn.yaml").write_text(
+        'connection_string: "Provider=MSOLAP;Data Source=X"\ndescription: "Test"'
+    )
+
+    payload = json.loads(search_connection_context("myconn", "anything", str(connections_dir)))
+
+    assert payload["match_count"] == 0
+    assert "No context markdown" in payload["message"]
+
+
+def test_list_connections_shows_overview_status(tmp_path) -> None:
+    """list_connections shows has_overview and has_full_context."""
+    connections_dir = tmp_path / "conns"
+    connections_dir.mkdir()
+    (connections_dir / "myconn.yaml").write_text(
+        'connection_string: "Provider=MSOLAP;Data Source=X"\ndescription: "Test"'
+    )
+    (connections_dir / "myconn_overview.md").write_text("# Overview")
+
+    payload = json.loads(list_connections(str(connections_dir)))
+
+    conn = payload["connections"][0]
+    assert conn["has_overview"] is True
+    assert conn["has_full_context"] is False
 

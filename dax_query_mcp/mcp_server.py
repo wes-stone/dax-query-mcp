@@ -99,18 +99,22 @@ DBCC, ALTER, CREATE, DELETE, or DROP. They will be rejected. Use \
 get_connection_context or inspect_connection for metadata instead.
 
 4. Before writing any DAX query, call get_connection_context to learn the \
-available tables, columns, measures, and filters for the connection.
+available tables, columns, measures, and filters for the connection. \
+This returns the compact overview by default — only request detail='full' \
+if the overview is insufficient. Use search_connection_context to find \
+specific information without loading the entire context.
 
 ## Tool overview — when to use each tool
 
 | Tool | Purpose |
 |---|---|
 | list_connections | Discover available connections. Call first if the user hasn't specified one. |
-| get_connection_context | Get curated schema (tables, columns, measures, filters) for a connection. Call BEFORE writing DAX. |
+| get_connection_context | Get schema overview for a connection (compact by default, detail='full' for everything). Call BEFORE writing DAX. |
 | run_connection_query | Execute a DAX query against a named connection and return structured results. Primary query tool. |
 | run_connection_query_markdown | Same as run_connection_query but returns ready-to-render markdown. Use when you only need display output. |
 | run_ad_hoc_query | Execute DAX against a raw connection string (no named connection required). |
 | inspect_connection | Live schema discovery via MDSCHEMA rowsets. Use only when get_connection_context is unavailable or stale. |
+| search_connection_context | Search the full context docs for specific terms (tables, columns, filters). Use instead of loading full context. |
 | search_columns | Fuzzy search for columns across all tables by name or description. |
 | search_measures | Fuzzy search for measures by name, description, or expression. |
 | export_to_csv | Save query results to a timestamped CSV file. |
@@ -290,8 +294,8 @@ def list_connections(connections_dir: str = DEFAULT_CONNECTIONS_DIR) -> str:
                 "description": connection.description,
                 "suggested_skill": connection.suggested_skill,
                 "suggested_skill_reason": connection.suggested_skill_reason,
-                "has_context_markdown": connection.context_markdown is not None,
-                "context_path": connection.context_path,
+                "has_overview": connection.overview_markdown is not None,
+                "has_full_context": connection.context_markdown is not None,
             }
             for connection in connections.values()
         ],
@@ -303,20 +307,35 @@ def list_connections(connections_dir: str = DEFAULT_CONNECTIONS_DIR) -> str:
 def get_connection_context(
     connection_name: str,
     connections_dir: str = DEFAULT_CONNECTIONS_DIR,
+    detail: str = "overview",
 ) -> str:
-    """Return metadata and curated markdown context for a named connection.
+    """Return metadata and context for a named connection.
 
     This is the PRIMARY way to discover tables, columns, measures, and filters.
     Always call this FIRST before writing any DAX query.
+
+    detail levels:
+    - "overview" (default): Returns the compact overview with key tables, measures,
+      and a few example queries. Fast and concise — use this first.
+    - "full": Returns the complete context markdown. Only use if overview is
+      insufficient and you need deep detail on filters, column values, etc.
     """
     connection = _get_connection(connection_name, connections_dir)
+
+    if detail == "full":
+        context = connection.context_markdown
+    else:
+        context = connection.overview_markdown or connection.context_markdown
+
     payload = {
         "connection_name": connection.name,
         "description": connection.description,
         "suggested_skill": connection.suggested_skill,
         "suggested_skill_reason": connection.suggested_skill_reason,
-        "context_path": connection.context_path,
-        "context_markdown": connection.context_markdown,
+        "detail_level": detail,
+        "has_full_context": connection.context_markdown is not None,
+        "has_overview": connection.overview_markdown is not None,
+        "context_markdown": context,
         "NEXT_ACTION": (
             "You now have the schema. Compose a DAX query AND immediately "
             "execute it using run_connection_query in the SAME turn. "
@@ -324,7 +343,62 @@ def get_connection_context(
             "they see the actual data table."
         ),
     }
+    if detail == "overview" and connection.context_markdown is not None:
+        payload["NOTE"] = (
+            "This is the compact overview. If you need more detail on "
+            "specific tables, columns, or filter values, call "
+            "get_connection_context with detail='full' or use "
+            "search_connection_context to search for specific terms."
+        )
     return _to_json(payload)
+
+
+@mcp.tool()
+def search_connection_context(
+    connection_name: str,
+    search_term: str,
+    connections_dir: str = DEFAULT_CONNECTIONS_DIR,
+    max_lines: int = 50,
+) -> str:
+    """Search the full connection context markdown for specific terms.
+
+    Use this instead of loading the full context when you need to find
+    specific information about tables, columns, filters, or query patterns.
+    Returns matching lines with surrounding context.
+    """
+    connection = _get_connection(connection_name, connections_dir)
+    if not connection.context_markdown:
+        return _to_json({
+            "connection_name": connection_name,
+            "search_term": search_term,
+            "match_count": 0,
+            "matches": [],
+            "message": "No context markdown found for this connection.",
+        })
+
+    lines = connection.context_markdown.splitlines()
+    search_lower = search_term.lower()
+    matches: list[dict[str, Any]] = []
+
+    for i, line in enumerate(lines):
+        if search_lower in line.lower():
+            start = max(0, i - 2)
+            end = min(len(lines), i + 3)
+            context_lines = lines[start:end]
+            matches.append({
+                "line_number": i + 1,
+                "match_line": line.strip(),
+                "context": "\n".join(context_lines),
+            })
+            if len(matches) >= max_lines:
+                break
+
+    return _to_json({
+        "connection_name": connection_name,
+        "search_term": search_term,
+        "match_count": len(matches),
+        "matches": matches,
+    })
 
 
 @mcp.tool()
