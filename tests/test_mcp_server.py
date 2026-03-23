@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import pandas as pd
 from mcp.server.fastmcp.exceptions import ToolError
@@ -6,8 +7,10 @@ from mcp.server.fastmcp.exceptions import ToolError
 from dax_query_mcp.mcp_server import (
     _FOLLOWUP_MENU,
     _SERVER_INSTRUCTIONS,
+    clear_workstation,
     copy_to_clipboard,
     export_to_csv,
+    export_workstation,
     followup_menu,
     generate_data_dictionary,
     get_connection_context,
@@ -16,10 +19,13 @@ from dax_query_mcp.mcp_server import (
     get_schema,
     inspect_model_metadata,
     list_connections,
+    list_workstation,
     quick_chart,
+    remove_from_workstation,
     run_connection_query,
     run_connection_query_markdown,
     save_query_builder,
+    save_to_workstation,
     scaffold_power_query,
     scaffold_streamlit_app,
     search_columns,
@@ -149,7 +155,7 @@ description: "Sales model"
     assert "| Month | Revenue |" in payload["markdown_table"]
     assert "| Month | Revenue |" in payload["response_markdown"]
     assert "next_steps" in payload
-    assert len(payload["next_steps"]) == 10
+    assert len(payload["next_steps"]) == 11
     assert "### Query preview for `sales`" in markdown_only
 
 
@@ -1045,6 +1051,7 @@ _EXPECTED_ACTIONS = {
     "scaffold_streamlit_app",
     "scaffold_python",
     "scaffold_dax_studio",
+    "save_to_workstation",
 }
 
 
@@ -1123,4 +1130,229 @@ def test_no_mcp_tool_docstrings_are_placeholders() -> None:
         if (fn.__doc__ or "").strip().lower().startswith(_PLACEHOLDER_PREFIXES)
     ]
     assert not placeholders, f"MCP tools with placeholder docstrings: {placeholders}"
+
+
+# ── Workstation tests ────────────────────────────────────────────────
+
+
+def test_save_to_workstation(tmp_path) -> None:
+    """save_to_workstation creates a .workstation.json file."""
+    connections_dir = tmp_path / "Connections"
+    connections_dir.mkdir()
+
+    payload = json.loads(
+        save_to_workstation(
+            connection_name="sales",
+            query='EVALUATE ROW("Revenue", 42)',
+            description="Monthly revenue",
+            query_name="monthly_revenue",
+            connections_dir=str(connections_dir),
+        )
+    )
+
+    assert payload["query_name"] == "monthly_revenue"
+    ws_file = Path(payload["path"])
+    assert ws_file.exists()
+    saved = json.loads(ws_file.read_text(encoding="utf-8"))
+    assert saved["query_name"] == "monthly_revenue"
+    assert saved["connection_name"] == "sales"
+    assert saved["query"] == 'EVALUATE ROW("Revenue", 42)'
+    assert saved["description"] == "Monthly revenue"
+    assert "saved_at" in saved
+
+
+def test_save_to_workstation_auto_name(tmp_path) -> None:
+    """Auto-generates slug from description when query_name is blank."""
+    connections_dir = tmp_path / "Connections"
+    connections_dir.mkdir()
+
+    payload = json.loads(
+        save_to_workstation(
+            connection_name="sales",
+            query='EVALUATE ROW("X", 1)',
+            description="Top 10 Products by Revenue",
+            connections_dir=str(connections_dir),
+        )
+    )
+
+    assert payload["query_name"] == "top_10_products_by_revenue"
+    assert Path(payload["path"]).exists()
+
+
+def test_list_workstation_empty(tmp_path) -> None:
+    """Returns empty list message when no queries saved."""
+    connections_dir = tmp_path / "Connections"
+    connections_dir.mkdir()
+
+    payload = json.loads(list_workstation(connections_dir=str(connections_dir)))
+
+    assert payload["count"] == 0
+    assert payload["queries"] == []
+    assert "empty" in payload["message"].lower()
+
+
+def test_list_workstation_with_queries(tmp_path) -> None:
+    """Shows saved queries after saving them."""
+    connections_dir = tmp_path / "Connections"
+    connections_dir.mkdir()
+
+    save_to_workstation(
+        connection_name="sales",
+        query="EVALUATE Sales",
+        description="All sales",
+        query_name="all_sales",
+        connections_dir=str(connections_dir),
+    )
+    save_to_workstation(
+        connection_name="sales",
+        query="EVALUATE Products",
+        description="All products",
+        query_name="all_products",
+        connections_dir=str(connections_dir),
+    )
+
+    payload = json.loads(list_workstation(connections_dir=str(connections_dir)))
+
+    assert payload["count"] == 2
+    names = [q["query_name"] for q in payload["queries"]]
+    assert "all_sales" in names
+    assert "all_products" in names
+
+
+def test_remove_from_workstation(tmp_path) -> None:
+    """Removes a query from the workstation."""
+    connections_dir = tmp_path / "Connections"
+    connections_dir.mkdir()
+
+    save_to_workstation(
+        connection_name="sales",
+        query="EVALUATE Sales",
+        description="All sales",
+        query_name="all_sales",
+        connections_dir=str(connections_dir),
+    )
+
+    payload = json.loads(
+        remove_from_workstation(
+            query_name="all_sales",
+            connections_dir=str(connections_dir),
+        )
+    )
+
+    assert payload["query_name"] == "all_sales"
+    assert "removed" in payload["message"].lower()
+
+    listing = json.loads(list_workstation(connections_dir=str(connections_dir)))
+    assert listing["count"] == 0
+
+
+def test_remove_from_workstation_not_found(tmp_path) -> None:
+    """Error when removing a query that doesn't exist."""
+    connections_dir = tmp_path / "Connections"
+    connections_dir.mkdir()
+
+    try:
+        remove_from_workstation(
+            query_name="nonexistent",
+            connections_dir=str(connections_dir),
+        )
+    except (ValueError, ToolError) as exc:
+        assert "not found" in str(exc).lower()
+    else:
+        raise AssertionError("Expected remove_from_workstation to raise on missing query")
+
+
+def test_clear_workstation(tmp_path) -> None:
+    """Clears all queries from the workstation."""
+    connections_dir = tmp_path / "Connections"
+    connections_dir.mkdir()
+
+    save_to_workstation(
+        connection_name="s", query="Q1", description="D1",
+        query_name="q1", connections_dir=str(connections_dir),
+    )
+    save_to_workstation(
+        connection_name="s", query="Q2", description="D2",
+        query_name="q2", connections_dir=str(connections_dir),
+    )
+
+    payload = json.loads(clear_workstation(connections_dir=str(connections_dir)))
+
+    assert payload["removed_count"] == 2
+    listing = json.loads(list_workstation(connections_dir=str(connections_dir)))
+    assert listing["count"] == 0
+
+
+def test_export_workstation_scaffold(tmp_path) -> None:
+    """Exports scaffold workspace with multiple queries."""
+    connections_dir = tmp_path / "Connections"
+    connections_dir.mkdir()
+
+    save_to_workstation(
+        connection_name="sales",
+        query='EVALUATE ROW("Revenue", 42)',
+        description="Revenue query",
+        query_name="revenue",
+        connections_dir=str(connections_dir),
+    )
+    save_to_workstation(
+        connection_name="finance",
+        query='EVALUATE ROW("Cost", 10)',
+        description="Cost query",
+        query_name="cost",
+        connections_dir=str(connections_dir),
+    )
+
+    out_dir = tmp_path / "export_scaffold"
+    payload = json.loads(
+        export_workstation(
+            output_dir=str(out_dir),
+            connections_dir=str(connections_dir),
+            format="scaffold",
+        )
+    )
+
+    assert len(payload["files_created"]) >= 4  # 2 .dax + run_queries.py + pyproject + README
+    assert (out_dir / "queries" / "revenue.dax").exists()
+    assert (out_dir / "queries" / "cost.dax").exists()
+    assert (out_dir / "run_queries.py").exists()
+    assert (out_dir / "pyproject.toml").exists()
+    assert (out_dir / "README.md").exists()
+
+    readme = (out_dir / "README.md").read_text(encoding="utf-8")
+    assert "revenue" in readme
+    assert "cost" in readme
+
+    run_script = (out_dir / "run_queries.py").read_text(encoding="utf-8")
+    assert "revenue" in run_script
+    assert "cost" in run_script
+
+
+def test_export_workstation_dax(tmp_path) -> None:
+    """Exports only .dax files in dax format."""
+    connections_dir = tmp_path / "Connections"
+    connections_dir.mkdir()
+
+    save_to_workstation(
+        connection_name="sales",
+        query='EVALUATE ROW("Revenue", 42)',
+        description="Revenue query",
+        query_name="revenue",
+        connections_dir=str(connections_dir),
+    )
+
+    out_dir = tmp_path / "export_dax"
+    payload = json.loads(
+        export_workstation(
+            output_dir=str(out_dir),
+            connections_dir=str(connections_dir),
+            format="dax",
+        )
+    )
+
+    assert len(payload["files_created"]) == 1
+    assert (out_dir / "queries" / "revenue.dax").exists()
+    # No scaffold files
+    assert not (out_dir / "run_queries.py").exists()
+    assert not (out_dir / "pyproject.toml").exists()
 

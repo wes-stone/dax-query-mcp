@@ -4,6 +4,7 @@ import json
 import os
 import re
 import tempfile
+import textwrap
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -66,6 +67,7 @@ _SAFE_SYSTEM_PREFIXES = (
 _NEXT_STEPS = [
     "Filter / refine — narrow to a specific account, TPID, or time range",
     "Aggregate — total by month, by account, etc.",
+    "Save to workstation — save this query to your working session",
     "Copy to clipboard — copy as TSV (paste into Excel) or markdown",
     "Export as CSV — save results to a CSV file",
     "Quick chart — generate a bar, line, or pie chart",
@@ -123,6 +125,11 @@ available tables, columns, measures, and filters for the connection.
 | get_data_dictionary | Get the data dictionary YAML for a connection (descriptions, measures, filters). |
 | generate_data_dictionary | Generate a data dictionary YAML skeleton from live schema inspection. |
 | rerun_last_query | Re-execute the most recently run query. |
+| save_to_workstation | Save a query to the session workstation for iterative exploration. |
+| list_workstation | List all queries saved in the current workstation session. |
+| remove_from_workstation | Remove a saved query from the workstation by name. |
+| clear_workstation | Clear all queries from the workstation. |
+| export_workstation | Export all workstation queries as a scaffold workspace or .dax files. |
 
 ## DAX best practices
 
@@ -166,14 +173,15 @@ Bad query examples (avoid these):
 After every successful query, present the next_steps list and offer these follow-up actions:
 1. Filter / refine — narrow to specific accounts, dates, or segments.
 2. Aggregate — total by month, by account, by product, etc.
-3. Copy to clipboard — use copy_to_clipboard (format="tsv" for Excel, format="markdown" for docs).
-4. Export as CSV — use export_to_csv to save results to a timestamped file.
-5. Quick chart — use quick_chart to generate a bar, line, or pie chart visualization.
-6. Scaffold Power Query — use scaffold_power_query to generate Excel Power Query M code.
-7. Scaffold Streamlit — use scaffold_streamlit_app to generate a dashboard app.
-8. Save to DAX Studio — use save_query_builder to persist as .dax artifacts.
-9. Scaffold Python workspace — use scaffold_dax_workspace to create a standalone project.
-10. Re-run last query — use rerun_last_query to execute the same query again.
+3. Save to workstation — use save_to_workstation to save a query to the working session for later export.
+4. Copy to clipboard — use copy_to_clipboard (format="tsv" for Excel, format="markdown" for docs).
+5. Export as CSV — use export_to_csv to save results to a timestamped file.
+6. Quick chart — use quick_chart to generate a bar, line, or pie chart visualization.
+7. Scaffold Power Query — use scaffold_power_query to generate Excel Power Query M code.
+8. Scaffold Streamlit — use scaffold_streamlit_app to generate a dashboard app.
+9. Save to DAX Studio — use save_query_builder to persist as .dax artifacts.
+10. Scaffold Python workspace — use scaffold_dax_workspace to create a standalone project.
+11. Re-run last query — use rerun_last_query to execute the same query again.
 
 ## Performance tips
 
@@ -231,6 +239,12 @@ _FOLLOWUP_MENU: list[dict[str, Any]] = [
         "description": "Save the query as .dax and .dax.queryBuilder artifacts for DAX Studio. Uses save_query_builder under the hood.",
         "required_params": ["query_builder_json", "queries_dir"],
         "example_usage": 'save_query_builder(query_builder_json="...", queries_dir="./queries")',
+    },
+    {
+        "name": "save_to_workstation",
+        "description": "Save the query to the session workstation for iterative exploration and later export.",
+        "required_params": ["connection_name", "query", "description"],
+        "example_usage": 'save_to_workstation(connection_name="sales", query="EVALUATE ...", description="Monthly revenue")',
     },
 ]
 
@@ -1378,6 +1392,368 @@ def generate_data_dictionary(
         payload["file_path"] = str(out)
 
     return _to_json(payload)
+
+
+# ── Workstation helpers ──────────────────────────────────────────────
+
+def _get_workstation_dir(connections_dir: str) -> Path:
+    """Return the workstation directory path, creating it if needed."""
+    base = Path(connections_dir).parent
+    ws_dir = base / "_workstation"
+    ws_dir.mkdir(parents=True, exist_ok=True)
+    return ws_dir
+
+
+def _slugify(text: str) -> str:
+    """Convert a description to a filesystem-safe slug."""
+    slug = re.sub(r"[^\w\s-]", "", text.lower())
+    slug = re.sub(r"[\s_-]+", "_", slug).strip("_")
+    return slug or "query"
+
+
+@mcp.tool()
+def save_to_workstation(
+    connection_name: str,
+    query: str,
+    description: str,
+    query_name: str = "",
+    connections_dir: str = DEFAULT_CONNECTIONS_DIR,
+) -> str:
+    """Save a DAX query to the session workstation for iterative exploration.
+
+    The workstation is a temporary working directory where you accumulate
+    queries during an exploration session.  When finished, use
+    export_workstation to export all saved queries as a scaffold project
+    or individual .dax files.
+
+    Parameters:
+        connection_name: Name of the connection this query targets.
+        query: The DAX query text.
+        description: Human-readable description of what the query does.
+        query_name: Optional slug name; auto-generated from description if blank.
+        connections_dir: Connections directory (used to locate the workstation).
+    """
+    if not query_name.strip():
+        query_name = _slugify(description)
+
+    ws_dir = _get_workstation_dir(connections_dir)
+    file_path = ws_dir / f"{query_name}.workstation.json"
+
+    entry: dict[str, Any] = {
+        "query_name": query_name,
+        "connection_name": connection_name,
+        "query": query,
+        "description": description,
+        "saved_at": datetime.now().isoformat(),
+    }
+
+    file_path.write_text(json.dumps(entry, indent=2), encoding="utf-8")
+
+    return _to_json({
+        "message": f"Query '{query_name}' saved to workstation.",
+        "query_name": query_name,
+        "path": str(file_path),
+    })
+
+
+@mcp.tool()
+def list_workstation(
+    connections_dir: str = DEFAULT_CONNECTIONS_DIR,
+) -> str:
+    """List all queries saved in the current workstation session.
+
+    Returns a JSON array of saved queries with their names, descriptions,
+    connection names, and timestamps.  Shows a helpful message if the
+    workstation is empty.
+    """
+    ws_dir = _get_workstation_dir(connections_dir)
+    files = sorted(ws_dir.glob("*.workstation.json"))
+
+    if not files:
+        return _to_json({
+            "message": "Workstation is empty. Use save_to_workstation to add queries.",
+            "count": 0,
+            "queries": [],
+        })
+
+    queries = []
+    for f in files:
+        entry = json.loads(f.read_text(encoding="utf-8"))
+        queries.append({
+            "query_name": entry["query_name"],
+            "description": entry.get("description", ""),
+            "connection_name": entry.get("connection_name", ""),
+            "saved_at": entry.get("saved_at", ""),
+        })
+
+    return _to_json({
+        "message": f"{len(queries)} query(ies) in workstation.",
+        "count": len(queries),
+        "queries": queries,
+    })
+
+
+@mcp.tool()
+def remove_from_workstation(
+    query_name: str,
+    connections_dir: str = DEFAULT_CONNECTIONS_DIR,
+) -> str:
+    """Remove a saved query from the workstation by name.
+
+    Parameters:
+        query_name: The slug name of the query to remove.
+        connections_dir: Connections directory (used to locate the workstation).
+    """
+    ws_dir = _get_workstation_dir(connections_dir)
+    file_path = ws_dir / f"{query_name}.workstation.json"
+
+    if not file_path.exists():
+        raise invalid_params(
+            message=f"Query '{query_name}' not found in workstation.",
+            suggestion="Call list_workstation to see available queries.",
+            parameter="query_name",
+        )
+
+    file_path.unlink()
+    return _to_json({
+        "message": f"Query '{query_name}' removed from workstation.",
+        "query_name": query_name,
+    })
+
+
+@mcp.tool()
+def clear_workstation(
+    connections_dir: str = DEFAULT_CONNECTIONS_DIR,
+) -> str:
+    """Clear all queries from the workstation.
+
+    Removes every saved query file from the workstation directory and
+    returns the count of removed items.
+    """
+    ws_dir = _get_workstation_dir(connections_dir)
+    files = list(ws_dir.glob("*.workstation.json"))
+    for f in files:
+        f.unlink()
+    return _to_json({
+        "message": f"Cleared {len(files)} query(ies) from workstation.",
+        "removed_count": len(files),
+    })
+
+
+_MULTI_RUN_TEMPLATE = textwrap.dedent("""\
+    \"\"\"Run all workstation queries and print results.
+
+    Requirements (Windows only):
+        pip install pywin32 pandas rich   # or use the generated pyproject.toml with uv
+    \"\"\"
+
+    from __future__ import annotations
+
+    import re
+    import sys
+    from contextlib import suppress
+    from datetime import datetime
+    from pathlib import Path
+
+    import pandas as pd
+
+    _ANSI_RE = re.compile(r'\\x1b\\[[0-9;]*m')
+
+    # ── Connections ───────────────────────────────────────────────────────
+    # Map connection names to connection strings.  Edit with your real values.
+    CONNECTIONS = {connections_dict}
+
+
+    def dax_to_pandas(
+        dax_query: str,
+        conn_str: str,
+        *,
+        timeout: int = 1800,
+        max_rows: int | None = None,
+    ) -> pd.DataFrame:
+        \"\"\"Execute a DAX query via COM/ADODB and return a pandas DataFrame.\"\"\"
+        import win32com.client  # Windows-only
+
+        conn = win32com.client.Dispatch("ADODB.Connection")
+        conn.ConnectionTimeout = 300
+        conn.CommandTimeout = timeout
+        conn.Open(conn_str)
+
+        cmd = win32com.client.Dispatch("ADODB.Command")
+        cmd.ActiveConnection = conn
+        cmd.CommandText = dax_query
+        cmd.CommandTimeout = timeout
+
+        try:
+            recordset = cmd.Execute()[0]
+            fields = [recordset.Fields(i).Name for i in range(recordset.Fields.Count)]
+            rows = recordset.GetRows(max_rows) if max_rows else recordset.GetRows()
+        finally:
+            with suppress(Exception):
+                cmd.ActiveConnection = None
+            for obj in (recordset, conn):
+                close = getattr(obj, "Close", None)
+                if callable(close):
+                    with suppress(Exception):
+                        close()
+
+        data = {{}}
+        for i, name in enumerate(fields):
+            name = _ANSI_RE.sub('', name)
+            vals = [_strip_tz(v) for v in rows[i]] if rows and i < len(rows) else []
+            data[name] = list(vals)
+
+        return pd.DataFrame(data)
+
+
+    def _strip_tz(value: object) -> object:
+        if isinstance(value, datetime) and getattr(value, "tzinfo", None) is not None:
+            return value.replace(tzinfo=None)
+        return value
+
+
+    QUERIES = {queries_list}
+
+
+    if __name__ == "__main__":
+        from rich.console import Console
+        from rich.table import Table
+
+        console = Console()
+
+        for entry in QUERIES:
+            qfile = Path(entry["file"])
+            conn_str = CONNECTIONS.get(entry["connection"], "")
+            if not qfile.exists():
+                console.print(f"[red]Missing: {{qfile}}[/red]")
+                continue
+            dax = qfile.read_text(encoding="utf-8")
+            console.print(f"\\n[bold]Running {{entry['name']}} ...[/bold]")
+            console.print(f"  [dim]{{entry['description']}}[/dim]")
+            df = dax_to_pandas(dax, conn_str)
+            console.print(f"  [green]{{len(df)}} rows x {{len(df.columns)}} cols[/green]")
+            table = Table(show_lines=True, title=entry["name"])
+            for col in df.columns:
+                table.add_column(str(col), header_style="bold cyan")
+            for _, row in df.head(20).iterrows():
+                table.add_row(*[str(v) for v in row])
+            console.print(table)
+""")
+
+_MULTI_PYPROJECT_TEMPLATE = textwrap.dedent("""\
+    [project]
+    name = "{project_name}"
+    version = "0.1.0"
+    description = "DAX workstation — exported queries"
+    requires-python = ">=3.12"
+    dependencies = [
+        "pandas>=2.3.0",
+        "pywin32>=310",
+        "rich>=13.0.0",
+    ]
+""")
+
+
+@mcp.tool()
+def export_workstation(
+    output_dir: str,
+    connections_dir: str = DEFAULT_CONNECTIONS_DIR,
+    format: str = "scaffold",
+) -> str:
+    """Export all workstation queries as a scaffold workspace or .dax files.
+
+    Use this after accumulating queries with save_to_workstation.
+
+    Parameters:
+        output_dir: Directory to write the exported files.
+        connections_dir: Connections directory (used to locate the workstation).
+        format: "scaffold" creates a full project (run_queries.py, pyproject.toml,
+                README, and queries/ dir).  "dax" writes only .dax files.
+    """
+    ws_dir = _get_workstation_dir(connections_dir)
+    files = sorted(ws_dir.glob("*.workstation.json"))
+
+    if not files:
+        return _to_json({
+            "message": "Workstation is empty — nothing to export.",
+            "files_created": [],
+        })
+
+    entries = [json.loads(f.read_text(encoding="utf-8")) for f in files]
+    out = Path(output_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    queries_dir = out / "queries"
+    queries_dir.mkdir(exist_ok=True)
+    created: list[str] = []
+
+    # Write .dax files
+    for entry in entries:
+        dax_path = queries_dir / f"{entry['query_name']}.dax"
+        dax_path.write_text(entry["query"], encoding="utf-8")
+        created.append(str(dax_path))
+
+    if format == "dax":
+        return _to_json({
+            "message": f"Exported {len(entries)} .dax file(s).",
+            "files_created": created,
+            "output_dir": str(out),
+        })
+
+    # ── scaffold format ──────────────────────────────────────────────
+    connection_names = sorted({e["connection_name"] for e in entries})
+    connections_dict_repr = "{\n" + "".join(
+        f'    "{cn}": "YOUR_CONNECTION_STRING_HERE",\n' for cn in connection_names
+    ) + "}"
+
+    queries_list_repr = "[\n" + "".join(
+        f'    {{"name": "{e["query_name"]}", "file": "queries/{e["query_name"]}.dax", '
+        f'"connection": "{e["connection_name"]}", "description": "{e["description"]}"}},\n'
+        for e in entries
+    ) + "]"
+
+    safe_project = out.name.replace(" ", "-").lower()
+
+    run_script = out / "run_queries.py"
+    run_script.write_text(
+        _MULTI_RUN_TEMPLATE.format(
+            connections_dict=connections_dict_repr,
+            queries_list=queries_list_repr,
+        ),
+        encoding="utf-8",
+    )
+    created.append(str(run_script))
+
+    pyproject = out / "pyproject.toml"
+    pyproject.write_text(
+        _MULTI_PYPROJECT_TEMPLATE.format(project_name=safe_project),
+        encoding="utf-8",
+    )
+    created.append(str(pyproject))
+
+    # README listing all queries
+    readme_lines = [
+        f"# {safe_project}\n",
+        "\nDAX workstation exported by **dax-query-mcp**.\n",
+        "\n## Quick start\n",
+        "\n```bash\ncd " + str(out) + " && uv run run_queries.py\n```\n",
+        "\n## Queries\n",
+        "\n| Name | Connection | Description |",
+        "\n|------|------------|-------------|",
+    ]
+    for e in entries:
+        readme_lines.append(f"\n| {e['query_name']} | {e['connection_name']} | {e['description']} |")
+    readme_lines.append("\n")
+
+    readme = out / "README.md"
+    readme.write_text("".join(readme_lines), encoding="utf-8")
+    created.append(str(readme))
+
+    return _to_json({
+        "message": f"Exported {len(entries)} query(ies) as scaffold workspace.",
+        "files_created": created,
+        "output_dir": str(out),
+        "project_name": safe_project,
+    })
 
 
 def _to_json(payload: Any) -> str:
