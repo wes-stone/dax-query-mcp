@@ -29,7 +29,7 @@ Call `get_connection_context` with the connection name. This returns the schema 
 - **NEVER** write raw Python to execute DAX. Always use the MCP tools.
 - **NEVER** launch explore agents to find connection files or read .yaml files.
 - **NEVER** read run_query.py or dax_to_pandas source code to figure out how to query.
-- **ALWAYS** use `run_connection_query` or `run_connection_query_markdown` to execute queries.
+- **ALWAYS** use `run_connection_query` to execute queries.
 - **ALWAYS** show the result table and the next_steps list after every query.
 - Call `get_connection_context` once per session — don't re-read it every turn.
 
@@ -40,7 +40,7 @@ Call `get_connection_context` with the connection name. This returns the schema 
 | `list_connections` | Find available connections |
 | `get_connection_context` | Get schema overview (call once, before first query) |
 | `run_connection_query` | Execute a DAX query (primary tool) |
-| `run_connection_query_markdown` | Execute and get markdown-formatted results |
+| `run_ad_hoc_query` | Execute DAX with a raw connection string |
 | `search_connection_context` | Search for specific tables/columns/filters in docs |
 | `search_columns` | Fuzzy search for columns by name |
 | `search_measures` | Fuzzy search for measures by name |
