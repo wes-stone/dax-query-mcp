@@ -110,9 +110,8 @@ specific information without loading the entire context.
 |---|---|
 | list_connections | Discover available connections. Call first if the user hasn't specified one. |
 | get_connection_context | Get schema overview for a connection (compact by default, detail='full' for everything). Call BEFORE writing DAX. |
-| run_connection_query | Execute a DAX query against a named connection and return structured results. Primary query tool. |
-| run_connection_query_markdown | Same as run_connection_query but returns ready-to-render markdown. Use when you only need display output. |
-| run_ad_hoc_query | Execute DAX against a raw connection string (no named connection required). |
+| run_connection_query | Execute a DAX query against a named connection. Returns markdown — present as-is. |
+| run_ad_hoc_query | Execute DAX against a raw connection string (no named connection required). Returns markdown — present as-is. |
 | inspect_connection | Live schema discovery via MDSCHEMA rowsets. Use only when get_connection_context is unavailable or stale. |
 | search_connection_context | Search the full context docs for specific terms (tables, columns, filters). Use instead of loading full context. |
 | search_columns | Fuzzy search for columns across all tables by name or description. |
@@ -504,12 +503,11 @@ def run_connection_query(
     max_rows: int | None = None,
     profile: bool = False,
 ) -> str:
-    """Run a DAX query against a named connection and return a preview.
+    """Run a DAX query against a named connection.
 
-    IMPORTANT: The response_markdown field contains the COMPLETE output.
-    Render it EXACTLY as-is — including the table AND the numbered
-    'What next?' list at the bottom. Do NOT rewrite or rephrase the list.
-    Set profile=true to include per-phase timing information in the response.
+    Returns a markdown string containing the data table and a numbered
+    'What next?' menu. Present the returned text to the user as-is.
+    Set profile=true to include per-phase timing information.
     """
     validate_dax_query(query)
     connection = _get_connection(connection_name, connections_dir)
@@ -528,49 +526,13 @@ def run_connection_query(
         raise execution_failed(query, exc) from exc
 
     summary = summarize_dataframe(dataframe, preview_rows=preview_rows)
-    response_markdown = _build_query_response_markdown(
+    md = _build_query_response_markdown(
         title=f"Query preview for `{connection_name}`",
         summary=summary,
     )
-    payload = {
-        "connection_name": connection_name,
-        "connections_dir": str(resolve_connections_dir(connections_dir)),
-        "response_markdown": response_markdown,
-        "summary": {
-            "row_count": summary["row_count"],
-            "column_count": summary.get("column_count", len(summary.get("columns", []))),
-            "columns": summary.get("columns", []),
-        },
-    }
     if profile and "profiling" in dataframe.attrs:
-        payload["profiling"] = dataframe.attrs["profiling"]
-    return _to_json(payload)
-
-
-@mcp.tool()
-def run_connection_query_markdown(
-    connection_name: str,
-    query: str,
-    connections_dir: str = DEFAULT_CONNECTIONS_DIR,
-    preview_rows: int = DEFAULT_PREVIEW_ROWS,
-    max_rows: int | None = None,
-) -> str:
-    """Run a DAX query and return a ready-to-present markdown preview.
-
-    Render the returned markdown EXACTLY as-is. The output includes the data
-    table AND a numbered 'What next?' list. Do NOT rephrase or rewrite it.
-    """
-    validate_dax_query(query)
-    payload = json.loads(
-        run_connection_query(
-            connection_name=connection_name,
-            query=query,
-            connections_dir=connections_dir,
-            preview_rows=preview_rows,
-            max_rows=max_rows,
-        )
-    )
-    return str(payload["response_markdown"])
+        md += _format_profiling_markdown(dataframe.attrs["profiling"])
+    return md
 
 
 @mcp.tool()
@@ -775,10 +737,9 @@ def run_ad_hoc_query(
 ) -> str:
     """Run a DAX query against a raw connection string.
 
-    IMPORTANT: The response_markdown field contains the COMPLETE output.
-    Render it EXACTLY as-is — including the table AND the numbered
-    'What next?' list at the bottom. Do NOT rewrite or rephrase the list.
-    Set profile=true to include per-phase timing information in the response.
+    Returns a markdown string containing the data table and a numbered
+    'What next?' menu. Present the returned text to the user as-is.
+    Set profile=true to include per-phase timing information.
     """
     validate_dax_query(query)
     try:
@@ -795,21 +756,13 @@ def run_ad_hoc_query(
         raise execution_failed(query, exc) from exc
 
     summary = summarize_dataframe(dataframe, preview_rows=preview_rows)
-    response_markdown = _build_query_response_markdown(
+    md = _build_query_response_markdown(
         title="Query preview",
         summary=summary,
     )
-    payload = {
-        "response_markdown": response_markdown,
-        "summary": {
-            "row_count": summary["row_count"],
-            "column_count": summary.get("column_count", len(summary.get("columns", []))),
-            "columns": summary.get("columns", []),
-        },
-    }
     if profile and "profiling" in dataframe.attrs:
-        payload["profiling"] = dataframe.attrs["profiling"]
-    return _to_json(payload)
+        md += _format_profiling_markdown(dataframe.attrs["profiling"])
+    return md
 
 
 @mcp.tool()
@@ -1056,6 +1009,14 @@ def _build_query_response_markdown(*, title: str, summary: dict[str, Any]) -> st
         f"**What would you like to do next?**\n\n"
         f"{next_steps_md}\n"
     )
+
+
+def _format_profiling_markdown(profiling: dict[str, Any]) -> str:
+    """Append profiling details as a markdown section."""
+    lines = ["\n---\n", "**Profiling**\n"]
+    for key, value in profiling.items():
+        lines.append(f"- {key}: {value}")
+    return "\n".join(lines) + "\n"
 
 
 @mcp.tool()

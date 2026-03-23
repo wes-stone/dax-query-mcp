@@ -148,19 +148,15 @@ def test_run_connection_query_with_profile(tmp_path) -> None:
         encoding="utf-8",
     )
 
-    payload = json.loads(
-        run_connection_query(
-            connection_name="contoso",
-            query="EVALUATE Products",
-            connections_dir=str(connections_dir),
-            profile=True,
-        )
+    result = run_connection_query(
+        connection_name="contoso",
+        query="EVALUATE Products",
+        connections_dir=str(connections_dir),
+        profile=True,
     )
 
-    assert "profiling" in payload
-    assert "timings" in payload["profiling"]
-    assert payload["profiling"]["timings"]["total"] > 0
-    assert "summary" in payload["profiling"]
+    assert isinstance(result, str)
+    assert "Profiling" in result
 
 
 def test_run_connection_query_without_profile(tmp_path) -> None:
@@ -174,32 +170,29 @@ def test_run_connection_query_without_profile(tmp_path) -> None:
         encoding="utf-8",
     )
 
-    payload = json.loads(
-        run_connection_query(
-            connection_name="contoso",
-            query="EVALUATE Products",
-            connections_dir=str(connections_dir),
-            profile=False,
-        )
+    result = run_connection_query(
+        connection_name="contoso",
+        query="EVALUATE Products",
+        connections_dir=str(connections_dir),
+        profile=False,
     )
 
-    assert "profiling" not in payload
+    assert isinstance(result, str)
+    assert "Profiling" not in result
 
 
 def test_run_ad_hoc_query_with_profile() -> None:
     """run_ad_hoc_query(profile=True) includes profiling in response."""
     from dax_query_mcp.mcp_server import run_ad_hoc_query
 
-    payload = json.loads(
-        run_ad_hoc_query(
-            connection_string="MOCK://contoso",
-            query="EVALUATE Products",
-            profile=True,
-        )
+    result = run_ad_hoc_query(
+        connection_string="MOCK://contoso",
+        query="EVALUATE Products",
+        profile=True,
     )
 
-    assert "profiling" in payload
-    assert payload["profiling"]["timings"]["total"] > 0
+    assert isinstance(result, str)
+    assert "Profiling" in result
 
 
 def test_profiler_summary_format() -> None:

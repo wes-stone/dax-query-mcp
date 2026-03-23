@@ -67,7 +67,6 @@ pytestmark = [
 # Tool names as they appear in event.data.tool_name (prefixed by server name)
 _QUERY_TOOLS = {
     "dax-query-server-run_connection_query",
-    "dax-query-server-run_connection_query_markdown",
     "dax-query-server-run_ad_hoc_query",
 }
 _CONTEXT_TOOL = "dax-query-server-get_connection_context"
@@ -167,7 +166,7 @@ async def run_ai_conversation(
                     "\n\nCRITICAL: For ANY DAX or data query request, you MUST use "
                     "ONLY the dax-query-server MCP tools (dax-query-server-list_connections, "
                     "dax-query-server-get_connection_context, "
-                    "dax-query-server-run_connection_query_markdown). "
+                    "dax-query-server-run_connection_query). "
                     "ALWAYS execute queries — never just show query text. "
                     "Do NOT use powershell, view, grep, skill, or any other tools "
                     "for DAX queries."

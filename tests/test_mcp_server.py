@@ -23,7 +23,6 @@ from dax_query_mcp.mcp_server import (
     quick_chart,
     remove_from_workstation,
     run_connection_query,
-    run_connection_query_markdown,
     save_query_builder,
     save_to_workstation,
     scaffold_power_query,
@@ -138,26 +137,19 @@ description: "Sales model"
         lambda **kwargs: pd.DataFrame({"Month": ["2026-01"], "Revenue": [42]}),
     )
 
-    payload = json.loads(
-        run_connection_query(
-            connection_name="sales",
-            query="EVALUATE ROW(\"Revenue\", 42)",
-            connections_dir=str(connections_dir),
-            preview_rows=5,
-        )
-    )
-    markdown_only = run_connection_query_markdown(
+    result = run_connection_query(
         connection_name="sales",
         query="EVALUATE ROW(\"Revenue\", 42)",
         connections_dir=str(connections_dir),
         preview_rows=5,
     )
 
-    assert "| Month | Revenue |" in payload["response_markdown"]
-    assert "What would you like to do next?" in payload["response_markdown"]
-    assert "Copy to clipboard" in payload["response_markdown"]
-    assert "### Query preview for `sales`" in markdown_only
-    assert "What would you like to do next?" in markdown_only
+    # Result is a plain markdown string, not JSON
+    assert isinstance(result, str)
+    assert "| Month | Revenue |" in result
+    assert "What would you like to do next?" in result
+    assert "Copy to clipboard" in result
+    assert "### Query preview for `sales`" in result
 
 
 def test_query_builder_schema_and_error_guidance() -> None:
