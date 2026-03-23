@@ -153,11 +153,11 @@ description: "Sales model"
         preview_rows=5,
     )
 
-    assert "| Month | Revenue |" in payload["markdown_table"]
     assert "| Month | Revenue |" in payload["response_markdown"]
-    assert "next_steps" in payload
-    assert len(payload["next_steps"]) == 11
+    assert "What would you like to do next?" in payload["response_markdown"]
+    assert "Copy to clipboard" in payload["response_markdown"]
     assert "### Query preview for `sales`" in markdown_only
+    assert "What would you like to do next?" in markdown_only
 
 
 def test_query_builder_schema_and_error_guidance() -> None:

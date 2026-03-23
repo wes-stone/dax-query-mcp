@@ -89,10 +89,10 @@ do NOT just show the query text and ask if they want to run it. Build the \
 query AND run it with run_connection_query in the same turn so the user \
 sees both the query and the resulting data table.
 
-2. After EVERY query result, you MUST render the markdown_table field as an \
-actual markdown table for the user. Do NOT summarize, paraphrase, or describe \
-the data in words — SHOW THE TABLE. Then render the next_steps list as a \
-numbered markdown list. This is mandatory on every single query response.
+2. After EVERY query result, render the response_markdown field EXACTLY as-is. \
+It contains the data table AND the 'What next?' numbered list. \
+Do NOT summarize, paraphrase, rewrite, or invent your own next-steps list. \
+Copy the response_markdown verbatim into your response.
 
 3. NEVER generate admin-required queries: INFO.*(), $SYSTEM.DISCOVER_*, \
 DBCC, ALTER, CREATE, DELETE, or DROP. They will be rejected. Use \
@@ -506,8 +506,9 @@ def run_connection_query(
 ) -> str:
     """Run a DAX query against a named connection and return a preview.
 
-    Present the markdown_table as a table and the next_steps list as a
-    numbered list after every result.
+    IMPORTANT: The response_markdown field contains the COMPLETE output.
+    Render it EXACTLY as-is — including the table AND the numbered
+    'What next?' list at the bottom. Do NOT rewrite or rephrase the list.
     Set profile=true to include per-phase timing information in the response.
     """
     validate_dax_query(query)
@@ -527,17 +528,19 @@ def run_connection_query(
         raise execution_failed(query, exc) from exc
 
     summary = summarize_dataframe(dataframe, preview_rows=preview_rows)
+    response_markdown = _build_query_response_markdown(
+        title=f"Query preview for `{connection_name}`",
+        summary=summary,
+    )
     payload = {
         "connection_name": connection_name,
         "connections_dir": str(resolve_connections_dir(connections_dir)),
-        "presentation_hint": _MARKDOWN_PRESENTATION_HINT,
-        "markdown_table": summary["markdown_table"],
-        "response_markdown": _build_query_response_markdown(
-            title=f"Query preview for `{connection_name}`",
-            summary=summary,
-        ),
-        "next_steps": _NEXT_STEPS,
-        "summary": summary,
+        "response_markdown": response_markdown,
+        "summary": {
+            "row_count": summary["row_count"],
+            "column_count": summary.get("column_count", len(summary.get("columns", []))),
+            "columns": summary.get("columns", []),
+        },
     }
     if profile and "profiling" in dataframe.attrs:
         payload["profiling"] = dataframe.attrs["profiling"]
@@ -554,7 +557,8 @@ def run_connection_query_markdown(
 ) -> str:
     """Run a DAX query and return a ready-to-present markdown preview.
 
-    Present the returned markdown EXACTLY as-is, including the next_steps list.
+    Render the returned markdown EXACTLY as-is. The output includes the data
+    table AND a numbered 'What next?' list. Do NOT rephrase or rewrite it.
     """
     validate_dax_query(query)
     payload = json.loads(
@@ -743,17 +747,19 @@ def run_named_query(
         )
 
     summary = summarize_dataframe(dataframe, preview_rows=preview_rows)
+    response_markdown = _build_query_response_markdown(
+        title=f"Query preview for `{query_name}`",
+        summary=summary,
+    )
     payload = {
         "query_name": query_name,
         "config_dir": config_dir,
-        "presentation_hint": _MARKDOWN_PRESENTATION_HINT,
-        "markdown_table": summary["markdown_table"],
-        "response_markdown": _build_query_response_markdown(
-            title=f"Query preview for `{query_name}`",
-            summary=summary,
-        ),
-        "next_steps": _NEXT_STEPS,
-        "summary": summary,
+        "response_markdown": response_markdown,
+        "summary": {
+            "row_count": summary["row_count"],
+            "column_count": summary.get("column_count", len(summary.get("columns", []))),
+            "columns": summary.get("columns", []),
+        },
     }
     return _to_json(payload)
 
@@ -769,8 +775,9 @@ def run_ad_hoc_query(
 ) -> str:
     """Run a DAX query against a raw connection string.
 
-    Present the markdown_table as a table and the next_steps list as a
-    numbered list after every result.
+    IMPORTANT: The response_markdown field contains the COMPLETE output.
+    Render it EXACTLY as-is — including the table AND the numbered
+    'What next?' list at the bottom. Do NOT rewrite or rephrase the list.
     Set profile=true to include per-phase timing information in the response.
     """
     validate_dax_query(query)
@@ -788,15 +795,17 @@ def run_ad_hoc_query(
         raise execution_failed(query, exc) from exc
 
     summary = summarize_dataframe(dataframe, preview_rows=preview_rows)
+    response_markdown = _build_query_response_markdown(
+        title="Query preview",
+        summary=summary,
+    )
     payload = {
-        "presentation_hint": _MARKDOWN_PRESENTATION_HINT,
-        "markdown_table": summary["markdown_table"],
-        "response_markdown": _build_query_response_markdown(
-            title="Query preview",
-            summary=summary,
-        ),
-        "next_steps": _NEXT_STEPS,
-        "summary": summary,
+        "response_markdown": response_markdown,
+        "summary": {
+            "row_count": summary["row_count"],
+            "column_count": summary.get("column_count", len(summary.get("columns", []))),
+            "columns": summary.get("columns", []),
+        },
     }
     if profile and "profiling" in dataframe.attrs:
         payload["profiling"] = dataframe.attrs["profiling"]
@@ -1029,9 +1038,8 @@ def summarize_rowset(
 
 
 _RENDER_DIRECTIVE = (
-    "[RENDER INSTRUCTIONS: Display the markdown table below EXACTLY as-is. "
-    "Do NOT summarize, paraphrase, or describe the data — show the actual table. "
-    "After the table, show the numbered next-steps list EXACTLY as written.]\n\n"
+    "<!-- RENDER EXACTLY: Show the table and numbered list below verbatim. "
+    "Do NOT rewrite, summarize, or rephrase the 'What next?' list. -->\n\n"
 )
 
 
