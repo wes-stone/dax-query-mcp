@@ -934,9 +934,7 @@ def _build_query_response_markdown(*, title: str, summary: dict[str, Any]) -> st
         f"{summary['markdown_table']}\n\n"
         f"---\n\n"
         f"**What would you like to do next?**\n\n"
-        f"{next_steps_md}\n\n"
-        f"⚠️ The above table and numbered menu must appear in your response "
-        f"exactly as shown. Do not summarize or omit them.\n"
+        f"{next_steps_md}\n"
     )
 
 
