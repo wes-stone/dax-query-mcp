@@ -2,6 +2,8 @@
 
 MCP server for running DAX queries against Power BI semantic models.
 
+Check out [making use of skills and extensions](docs/dax-mcp-skill-and-extension-guide.md) for getting better results since the MCP can't do it all
+
 ## Features
 
 - **Connection-centric MCP server** — discover models, query with DAX, inspect schemas
@@ -66,45 +68,45 @@ The server returns plain markdown — results render as tables directly in chat.
 ## Connection YAML
 
 ```yaml
-connection_string: "..."       # required — MSOLAP connection string
-description: "..."             # human-readable label
-command_timeout_seconds: 1800  # DAX query timeout
+connection_string: "..." # required — MSOLAP connection string
+description: "..." # human-readable label
+command_timeout_seconds: 1800 # DAX query timeout
 connection_timeout_seconds: 300 # connection open timeout
-max_rows: null                 # row cap (null = unlimited)
-suggested_skill: "..."         # optional — hint an MCP client toward a specific skill
-suggested_skill_reason: "..."  # optional — why that skill is relevant
+max_rows: null # row cap (null = unlimited)
+suggested_skill: "..." # optional — hint an MCP client toward a specific skill
+suggested_skill_reason: "..." # optional — why that skill is relevant
 ```
 
 ## MCP tools
 
-| Tool | Purpose |
-|------|---------|
-| **Discovery** | |
-| `list_connections` | Discover available connections |
-| `get_connection_context` | Curated markdown context (tables, columns, measures) |
-| `search_connection_context` | Search context docs for specific terms |
-| `inspect_connection` | Live schema via safe `MDSCHEMA` rowsets |
-| **Querying** | |
-| `run_connection_query` | Run DAX against a named connection |
-| `run_ad_hoc_query` | Run DAX against a raw connection string |
-| **Search** | |
-| `search_columns` | Fuzzy-search columns across tables |
-| `search_measures` | Fuzzy-search measures by name or expression |
-| **Export** | |
-| `export_to_csv` | Export results to a timestamped CSV |
-| `copy_to_clipboard` | Copy results to clipboard (TSV or markdown) |
-| `scaffold_power_query` | Generate Power Query M code for Excel |
-| `scaffold_streamlit_app` | Generate a Streamlit visualization app |
-| `scaffold_dax_workspace` | Scaffold a standalone Python project |
-| `quick_chart` | Render a bar/line/pie chart as PNG |
-| **Query builder** | |
-| `save_query_builder` | Save `.dax` + `.dax.queryBuilder` artifacts |
-| `get_query_builder` | Load a saved query builder definition |
-| `get_query_builder_schema` | Get the expected JSON payload shape |
-| **Workstation** | |
-| `save_to_workstation` | Save a query to the session workstation |
-| `list_workstation` | List saved workstation queries |
-| `export_workstation` | Batch-export workstation as scaffold or `.dax` files |
+| Tool                        | Purpose                                              |
+| --------------------------- | ---------------------------------------------------- |
+| **Discovery**               |                                                      |
+| `list_connections`          | Discover available connections                       |
+| `get_connection_context`    | Curated markdown context (tables, columns, measures) |
+| `search_connection_context` | Search context docs for specific terms               |
+| `inspect_connection`        | Live schema via safe `MDSCHEMA` rowsets              |
+| **Querying**                |                                                      |
+| `run_connection_query`      | Run DAX against a named connection                   |
+| `run_ad_hoc_query`          | Run DAX against a raw connection string              |
+| **Search**                  |                                                      |
+| `search_columns`            | Fuzzy-search columns across tables                   |
+| `search_measures`           | Fuzzy-search measures by name or expression          |
+| **Export**                  |                                                      |
+| `export_to_csv`             | Export results to a timestamped CSV                  |
+| `copy_to_clipboard`         | Copy results to clipboard (TSV or markdown)          |
+| `scaffold_power_query`      | Generate Power Query M code for Excel                |
+| `scaffold_streamlit_app`    | Generate a Streamlit visualization app               |
+| `scaffold_dax_workspace`    | Scaffold a standalone Python project                 |
+| `quick_chart`               | Render a bar/line/pie chart as PNG                   |
+| **Query builder**           |                                                      |
+| `save_query_builder`        | Save `.dax` + `.dax.queryBuilder` artifacts          |
+| `get_query_builder`         | Load a saved query builder definition                |
+| `get_query_builder_schema`  | Get the expected JSON payload shape                  |
+| **Workstation**             |                                                      |
+| `save_to_workstation`       | Save a query to the session workstation              |
+| `list_workstation`          | List saved workstation queries                       |
+| `export_workstation`        | Batch-export workstation as scaffold or `.dax` files |
 
 > **Admin queries are blocked.** `INFO.*()` and `$SYSTEM.DISCOVER_*` require server admin rights.
 > Use `get_connection_context` or `inspect_connection` for metadata.
@@ -144,7 +146,10 @@ Add repo-specific patterns via `.copilot-guard.local.json`:
 ```json
 {
   "blocked_content_patterns": [
-    { "pattern": "PrivateWorkspace|InternalDataset", "reason": "Internal identifiers" }
+    {
+      "pattern": "PrivateWorkspace|InternalDataset",
+      "reason": "Internal identifiers"
+    }
   ]
 }
 ```
