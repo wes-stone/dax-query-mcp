@@ -1364,12 +1364,8 @@ def generate_data_dictionary(
 
 # ── Workstation helpers ──────────────────────────────────────────────
 
-def _get_workstation_dir(connections_dir: str) -> Path:
-    """Return the workstation directory path, creating it if needed."""
-    base = Path(connections_dir).parent
-    ws_dir = base / "_workstation"
-    ws_dir.mkdir(parents=True, exist_ok=True)
-    return ws_dir
+# ── In-memory workstation (ephemeral per server session) ─────────────
+_workstation: dict[str, dict[str, Any]] = {}
 
 
 def _slugify(text: str) -> str:
@@ -1389,25 +1385,21 @@ def save_to_workstation(
 ) -> str:
     """Save a DAX query to the session workstation for iterative exploration.
 
-    The workstation is a temporary working directory where you accumulate
-    queries during an exploration session.  When finished, use
-    export_workstation to export all saved queries as a scaffold project
-    or individual .dax files.
+    The workstation is ephemeral — it resets when the server restarts
+    (i.e. each new chat session starts fresh). Use export_workstation to
+    persist queries permanently as a scaffold project or .dax files.
 
     Parameters:
         connection_name: Name of the connection this query targets.
         query: The DAX query text.
         description: Human-readable description of what the query does.
         query_name: Optional slug name; auto-generated from description if blank.
-        connections_dir: Connections directory (used to locate the workstation).
+        connections_dir: Connections directory (unused for storage, kept for API compat).
     """
     if not query_name.strip():
         query_name = _slugify(description)
 
-    ws_dir = _get_workstation_dir(connections_dir)
-    file_path = ws_dir / f"{query_name}.workstation.json"
-
-    entry: dict[str, Any] = {
+    _workstation[query_name] = {
         "query_name": query_name,
         "connection_name": connection_name,
         "query": query,
@@ -1415,12 +1407,9 @@ def save_to_workstation(
         "saved_at": datetime.now().isoformat(),
     }
 
-    file_path.write_text(json.dumps(entry, indent=2), encoding="utf-8")
-
     return _to_json({
-        "message": f"Query '{query_name}' saved to workstation.",
+        "message": f"Query '{query_name}' saved to workstation (session-only).",
         "query_name": query_name,
-        "path": str(file_path),
     })
 
 
@@ -1428,31 +1417,28 @@ def save_to_workstation(
 def list_workstation(
     connections_dir: str = DEFAULT_CONNECTIONS_DIR,
 ) -> str:
-    """List all queries saved in the current workstation session.
+    """List all queries saved in the current session workstation.
 
     Returns a JSON array of saved queries with their names, descriptions,
     connection names, and timestamps.  Shows a helpful message if the
     workstation is empty.
     """
-    ws_dir = _get_workstation_dir(connections_dir)
-    files = sorted(ws_dir.glob("*.workstation.json"))
-
-    if not files:
+    if not _workstation:
         return _to_json({
             "message": "Workstation is empty. Use save_to_workstation to add queries.",
             "count": 0,
             "queries": [],
         })
 
-    queries = []
-    for f in files:
-        entry = json.loads(f.read_text(encoding="utf-8"))
-        queries.append({
-            "query_name": entry["query_name"],
-            "description": entry.get("description", ""),
-            "connection_name": entry.get("connection_name", ""),
-            "saved_at": entry.get("saved_at", ""),
-        })
+    queries = [
+        {
+            "query_name": e["query_name"],
+            "description": e.get("description", ""),
+            "connection_name": e.get("connection_name", ""),
+            "saved_at": e.get("saved_at", ""),
+        }
+        for e in _workstation.values()
+    ]
 
     return _to_json({
         "message": f"{len(queries)} query(ies) in workstation.",
@@ -1470,19 +1456,16 @@ def remove_from_workstation(
 
     Parameters:
         query_name: The slug name of the query to remove.
-        connections_dir: Connections directory (used to locate the workstation).
+        connections_dir: Unused (kept for API compat).
     """
-    ws_dir = _get_workstation_dir(connections_dir)
-    file_path = ws_dir / f"{query_name}.workstation.json"
-
-    if not file_path.exists():
+    if query_name not in _workstation:
         raise invalid_params(
             message=f"Query '{query_name}' not found in workstation.",
             suggestion="Call list_workstation to see available queries.",
             parameter="query_name",
         )
 
-    file_path.unlink()
+    del _workstation[query_name]
     return _to_json({
         "message": f"Query '{query_name}' removed from workstation.",
         "query_name": query_name,
@@ -1495,16 +1478,14 @@ def clear_workstation(
 ) -> str:
     """Clear all queries from the workstation.
 
-    Removes every saved query file from the workstation directory and
+    Removes every saved query from the in-memory workstation and
     returns the count of removed items.
     """
-    ws_dir = _get_workstation_dir(connections_dir)
-    files = list(ws_dir.glob("*.workstation.json"))
-    for f in files:
-        f.unlink()
+    count = len(_workstation)
+    _workstation.clear()
     return _to_json({
-        "message": f"Cleared {len(files)} query(ies) from workstation.",
-        "removed_count": len(files),
+        "message": f"Cleared {count} query(ies) from workstation.",
+        "removed_count": count,
     })
 
 
@@ -1630,24 +1611,22 @@ def export_workstation(
 ) -> str:
     """Export all workstation queries as a scaffold workspace or .dax files.
 
-    Use this after accumulating queries with save_to_workstation.
+    This is the "make it permanent" step — writes the in-memory workstation
+    to disk as a portable project.
 
     Parameters:
         output_dir: Directory to write the exported files.
-        connections_dir: Connections directory (used to locate the workstation).
+        connections_dir: Unused (kept for API compat).
         format: "scaffold" creates a full project (run_queries.py, pyproject.toml,
                 README, and queries/ dir).  "dax" writes only .dax files.
     """
-    ws_dir = _get_workstation_dir(connections_dir)
-    files = sorted(ws_dir.glob("*.workstation.json"))
-
-    if not files:
+    if not _workstation:
         return _to_json({
             "message": "Workstation is empty — nothing to export.",
             "files_created": [],
         })
 
-    entries = [json.loads(f.read_text(encoding="utf-8")) for f in files]
+    entries = list(_workstation.values())
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
     queries_dir = out / "queries"

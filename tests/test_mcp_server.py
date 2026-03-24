@@ -7,6 +7,7 @@ from fastmcp.exceptions import ToolError
 from dax_query_mcp.mcp_server import (
     _FOLLOWUP_MENU,
     _SERVER_INSTRUCTIONS,
+    _workstation,
     clear_workstation,
     copy_to_clipboard,
     export_to_csv,
@@ -33,6 +34,16 @@ from dax_query_mcp.mcp_server import (
     summarize_dataframe,
     summarize_rowset,
 )
+
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _clear_workstation():
+    """Ensure each test starts with a clean in-memory workstation."""
+    _workstation.clear()
+    yield
+    _workstation.clear()
 
 
 def test_summarize_dataframe_returns_preview_and_columns() -> None:
@@ -1131,7 +1142,7 @@ def test_no_mcp_tool_docstrings_are_placeholders() -> None:
 
 
 def test_save_to_workstation(tmp_path) -> None:
-    """save_to_workstation creates a .workstation.json file."""
+    """save_to_workstation stores query in memory."""
     connections_dir = tmp_path / "Connections"
     connections_dir.mkdir()
 
@@ -1146,10 +1157,8 @@ def test_save_to_workstation(tmp_path) -> None:
     )
 
     assert payload["query_name"] == "monthly_revenue"
-    ws_file = Path(payload["path"])
-    assert ws_file.exists()
-    saved = json.loads(ws_file.read_text(encoding="utf-8"))
-    assert saved["query_name"] == "monthly_revenue"
+    assert "monthly_revenue" in _workstation
+    saved = _workstation["monthly_revenue"]
     assert saved["connection_name"] == "sales"
     assert saved["query"] == 'EVALUATE ROW("Revenue", 42)'
     assert saved["description"] == "Monthly revenue"
@@ -1171,7 +1180,7 @@ def test_save_to_workstation_auto_name(tmp_path) -> None:
     )
 
     assert payload["query_name"] == "top_10_products_by_revenue"
-    assert Path(payload["path"]).exists()
+    assert "top_10_products_by_revenue" in _workstation
 
 
 def test_list_workstation_empty(tmp_path) -> None:
