@@ -1,0 +1,9 @@
+# Mock Contoso Sales connection
+# Use this for testing without a real Power BI connection
+
+connection_string: "MOCK://contoso"
+description: "Mock Contoso Sales cube for testing and development"
+
+# Timeouts don't matter for mock, but keep them realistic
+connection_timeout_seconds: 30
+command_timeout_seconds: 300

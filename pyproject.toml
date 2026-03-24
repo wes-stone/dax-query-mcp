@@ -8,10 +8,20 @@ version = "0.1.0"
 description = "Windows-first DAX and MCP toolkit for Power BI semantic models"
 readme = "README.md"
 requires-python = ">=3.12"
+license = {text = "MIT"}
+authors = [{name = "Wes Stone"}]
+keywords = ["dax", "power-bi", "mcp", "analysis-services", "semantic-model"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3.12",
+    "License :: OSI Approved :: MIT License",
+    "Topic :: Database",
+]
 dependencies = [
+    "fastmcp>=3.0",
     "loguru>=0.7.3",
     "matplotlib>=3.9.0",
-    "mcp>=1.2.0",
     "pandas>=2.3.0",
     "pydantic>=2.0.0",
     "pyperclip>=1.9.0",
@@ -19,6 +29,11 @@ dependencies = [
     "pyyaml>=6.0.2",
     "rich>=13.0.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/wes-stone/dax-query-mcp"
+Repository = "https://github.com/wes-stone/dax-query-mcp"
+Issues = "https://github.com/wes-stone/dax-query-mcp/issues"
 
 [project.scripts]
 dax-query = "dax_query_mcp.cli:main"

@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from mcp.server.fastmcp.exceptions import ToolError
+from fastmcp.exceptions import ToolError
 
 # ---------------------------------------------------------------------------
 # Error codes

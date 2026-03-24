@@ -11,7 +11,7 @@ from typing import Any
 
 import pandas as pd
 import yaml
-from mcp.server.fastmcp import FastMCP
+from fastmcp import FastMCP
 
 from .connections import load_connections, resolve_connections_dir
 from .data_dictionary import find_data_dictionary
@@ -82,117 +82,53 @@ _SERVER_INSTRUCTIONS = """\
 You are connected to the dax-query-server, which runs DAX queries against \
 Power BI / Analysis Services semantic models.
 
-## Rules — follow these every time
+## Rules
 
-1. ALWAYS EXECUTE queries — when the user asks for a DAX query or example, \
-do NOT just show the query text and ask if they want to run it. Build the \
-query AND run it with run_connection_query in the same turn so the user \
-sees both the query and the resulting data table.
+1. ALWAYS EXECUTE queries — build the DAX AND call run_connection_query in \
+the same turn. Never just show query text without running it.
+2. Render the response_markdown field EXACTLY as-is after every query. \
+Do NOT summarize, paraphrase, or invent your own next-steps list.
+3. NEVER generate admin queries (INFO.*(), $SYSTEM.DISCOVER_*, DBCC, \
+ALTER, CREATE, DELETE, DROP). Use get_connection_context for metadata.
 
-2. After EVERY query result, render the response_markdown field EXACTLY as-is. \
-It contains the data table AND the 'What next?' numbered list. \
-Do NOT summarize, paraphrase, rewrite, or invent your own next-steps list. \
-Copy the response_markdown verbatim into your response.
-
-3. NEVER generate admin-required queries: INFO.*(), $SYSTEM.DISCOVER_*, \
-DBCC, ALTER, CREATE, DELETE, or DROP. They will be rejected. Use \
-get_connection_context or inspect_connection for metadata instead.
-
-4. Before writing any DAX query, call get_connection_context to learn the \
-available tables, columns, measures, and filters for the connection. \
-This returns the compact overview by default — only request detail='full' \
-if the overview is insufficient. Use search_connection_context to find \
-specific information without loading the entire context.
-
-## Tool overview — when to use each tool
+## Tool overview
 
 | Tool | Purpose |
 |---|---|
-| list_connections | Discover available connections. Call first if the user hasn't specified one. |
-| get_connection_context | Get schema overview for a connection (compact by default, detail='full' for everything). Call BEFORE writing DAX. |
-| run_connection_query | Execute a DAX query against a named connection. Returns markdown — present as-is. |
-| run_ad_hoc_query | Execute DAX against a raw connection string (no named connection required). Returns markdown — present as-is. |
-| inspect_connection | Live schema discovery via MDSCHEMA rowsets. Use only when get_connection_context is unavailable or stale. |
-| search_connection_context | Search the full context docs for specific terms (tables, columns, filters). Use instead of loading full context. |
-| search_columns | Fuzzy search for columns across all tables by name or description. |
-| search_measures | Fuzzy search for measures by name, description, or expression. |
-| export_to_csv | Save query results to a timestamped CSV file. |
-| copy_to_clipboard | Copy query results to the system clipboard (TSV for Excel, markdown for docs). |
-| quick_chart | Generate a bar, line, or pie chart from query results. |
-| scaffold_power_query | Generate Excel Power Query M code to import DAX results. |
-| scaffold_streamlit_app | Generate a Streamlit dashboard app from query results. |
-| save_query_builder | Persist a structured query as .dax + .dax.queryBuilder artifacts. Always call get_query_builder_schema first. |
-| get_query_builder_schema | Get the expected JSON shape for save_query_builder. |
-| get_query_builder | Load a previously saved query builder definition. |
-| scaffold_dax_workspace | Create a standalone Python project with run_query.py, notebook, and pyproject.toml. |
-| get_data_dictionary | Get the data dictionary YAML for a connection (descriptions, measures, filters). |
-| generate_data_dictionary | Generate a data dictionary YAML skeleton from live schema inspection. |
-| rerun_last_query | Re-execute the most recently run query. |
-| save_to_workstation | Save a query to the session workstation for iterative exploration. |
-| list_workstation | List all queries saved in the current workstation session. |
-| remove_from_workstation | Remove a saved query from the workstation by name. |
-| clear_workstation | Clear all queries from the workstation. |
-| export_workstation | Export all workstation queries as a scaffold workspace or .dax files. |
+| list_connections | Discover available connections. |
+| get_connection_context | Schema overview — call BEFORE writing DAX. |
+| run_connection_query | Execute DAX against a named connection. |
+| run_ad_hoc_query | Execute DAX against a raw connection string. |
+| search_connection_context | Search context docs for tables, columns, filters. |
+| search_columns | Fuzzy search columns by name or description. |
+| search_measures | Fuzzy search measures by name or expression. |
+| export_to_csv | Save results to a timestamped CSV file. |
+| copy_to_clipboard | Copy results as TSV (Excel) or markdown. |
+| save_to_workstation | Save a query for iterative exploration. |
 
 ## DAX best practices
 
-- Always start queries with EVALUATE. Every DAX query must return a table.
-- Use SUMMARIZECOLUMNS or SUMMARIZE for aggregations instead of raw table scans.
+- Every query must start with EVALUATE and return a table.
+- Use SUMMARIZECOLUMNS (or SUMMARIZE) for grouped aggregations.
+- Use TREATAS for cross-table filtering instead of CALCULATETABLE.
 - Use TOPN to limit large result sets: `EVALUATE TOPN(100, 'Table')`.
-- Wrap scalar expressions in ROW: `EVALUATE ROW("Label", [Measure])`.
-- Quote table names with single quotes and column names with square brackets: `'Sales'[Revenue]`.
-- Prefer measures already defined in the model over writing inline CALCULATE expressions.
-
-Good query examples:
-  EVALUATE SUMMARIZECOLUMNS('Calendar'[Month], "Revenue", SUM('Sales'[Amount]))
-  EVALUATE TOPN(10, 'Products', 'Products'[Sales], DESC)
-  EVALUATE ROW("Total Revenue", [Total Revenue])
-
-Bad query examples (avoid these):
-  SELECT * FROM Sales           -- SQL, not DAX
-  EVALUATE Sales                -- returns entire table; add TOPN or filters
-  INFO.STORAGETABLECOLUMNS()    -- admin query; use get_connection_context instead
-  EVALUATE FILTER(ALL('Huge'), …) -- scanning all rows; add specific filters first
-
-## Common patterns
-
-1. Schema-first workflow: call get_connection_context → read tables/columns/measures → compose query → run_connection_query.
-2. Data dictionary: if has_context_markdown=true on a connection, get_connection_context returns curated docs. Prefer this over inspect_connection.
-3. Iterative refinement: run a broad query first, then add filters/aggregations based on results.
-4. Profiling: set profile=true on run_connection_query or run_ad_hoc_query to get per-phase timing. Use this to identify slow queries before optimizing.
+- Quote table names with single quotes, columns with brackets: `'Sales'[Revenue]`.
 
 ## Error codes and recovery
 
-| Error code | Meaning | Recovery action |
-|---|---|---|
-| ADMIN_QUERY_BLOCKED | Query uses forbidden admin syntax (INFO, DBCC, ALTER, etc.) | Rewrite using EVALUATE or call get_connection_context for metadata. |
-| CONNECTION_NOT_FOUND | The named connection does not exist in the connections directory. | Call list_connections to see available names and retry. |
-| QUERY_TIMEOUT | Query exceeded the configured timeout. | Simplify the query, add filters, reduce the result set, or increase command_timeout_seconds. |
-| EXECUTION_FAILED | DAX syntax error or server-side failure. | Check table/column names with get_connection_context, fix syntax, and retry. |
-| INVALID_PARAMS | Missing or invalid tool parameters. | Read the suggestion field in the error payload and correct the call. |
+| Code | Recovery |
+|---|---|
+| ADMIN_QUERY_BLOCKED | Rewrite with EVALUATE or use get_connection_context. |
+| CONNECTION_NOT_FOUND | Call list_connections and retry. |
+| QUERY_TIMEOUT | Simplify query, add filters, or increase timeout. |
+| EXECUTION_FAILED | Check names via get_connection_context, fix syntax. |
+| INVALID_PARAMS | Read the suggestion field and correct the call. |
 
 ## Follow-up options after query results
 
-After every successful query, present the next_steps list and offer these follow-up actions:
-1. Filter / refine — narrow to specific accounts, dates, or segments.
-2. Aggregate — total by month, by account, by product, etc.
-3. Save to workstation — use save_to_workstation to save a query to the working session for later export.
-4. Copy to clipboard — use copy_to_clipboard (format="tsv" for Excel, format="markdown" for docs).
-5. Export as CSV — use export_to_csv to save results to a timestamped file.
-6. Quick chart — use quick_chart to generate a bar, line, or pie chart visualization.
-7. Scaffold Power Query — use scaffold_power_query to generate Excel Power Query M code.
-8. Scaffold Streamlit — use scaffold_streamlit_app to generate a dashboard app.
-9. Save to DAX Studio — use save_query_builder to persist as .dax artifacts.
-10. Scaffold Python workspace — use scaffold_dax_workspace to create a standalone project.
-11. Re-run last query — use rerun_last_query to execute the same query again.
-
-## Performance tips
-
-- Always filter before aggregating to minimize data scanned.
-- Use TOPN to preview large tables before pulling full results.
-- Enable profiling (profile=true) to see connection, execution, and serialization timings.
-- If a query times out, break it into smaller queries or add date/category filters.
-- Prefer pre-defined measures over complex inline CALCULATE expressions; the engine optimizes them better.
+Present the next_steps list from the response. Key actions: \
+export_to_csv, copy_to_clipboard, save_to_workstation, quick_chart, \
+scaffold_power_query, scaffold_streamlit_app, scaffold_dax_workspace.
 """
 
 mcp = FastMCP("dax-query-server", instructions=_SERVER_INSTRUCTIONS)
@@ -278,7 +214,7 @@ def validate_dax_query(query: str) -> None:
         raise admin_query_blocked(blocked_pattern=match.group().strip())
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 def list_connections(connections_dir: str = DEFAULT_CONNECTIONS_DIR) -> str:
     """List configured connections. Call get_connection_context on any connection
     with has_context_markdown=true before writing DAX queries.
@@ -302,7 +238,7 @@ def list_connections(connections_dir: str = DEFAULT_CONNECTIONS_DIR) -> str:
     return _to_json(payload)
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 def get_connection_context(
     connection_name: str,
     connections_dir: str = DEFAULT_CONNECTIONS_DIR,
@@ -352,7 +288,7 @@ def get_connection_context(
     return _to_json(payload)
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 def search_connection_context(
     connection_name: str,
     search_term: str,
@@ -400,7 +336,7 @@ def search_connection_context(
     })
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 def get_data_dictionary(
     connection_name: str,
     connections_dir: str = DEFAULT_CONNECTIONS_DIR,
@@ -428,7 +364,7 @@ def get_data_dictionary(
     })
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 def get_schema(
     connection_name: str,
     connections_dir: str = DEFAULT_CONNECTIONS_DIR,
@@ -494,7 +430,7 @@ def get_schema(
     return _to_json(payload)
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 def run_connection_query(
     connection_name: str,
     query: str,
@@ -535,7 +471,7 @@ def run_connection_query(
     return md
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 def get_query_builder_schema(connection_name: str = "your_connection") -> str:
     """Return the expected JSON shape and a copyable example payload for save_query_builder."""
     return _to_json(query_builder_schema_payload(connection_name=connection_name))
@@ -580,7 +516,7 @@ def save_query_builder(
     return _to_json(payload)
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 def get_query_builder(
     query_name: str,
     queries_dir: str = "queries",
@@ -596,7 +532,7 @@ def get_query_builder(
     return _to_json(payload)
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 def inspect_connection(
     connection_name: str,
     connections_dir: str = DEFAULT_CONNECTIONS_DIR,
@@ -661,7 +597,7 @@ def inspect_connection_metadata(
     return results
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 def list_queries(config_dir: str = "queries") -> str:
     """Backward-compatible helper for the older query-centric workflow."""
     from .pipeline import DAXPipeline
@@ -682,7 +618,7 @@ def list_queries(config_dir: str = "queries") -> str:
     return _to_json(payload)
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 def run_named_query(
     query_name: str,
     config_dir: str = "queries",
@@ -726,7 +662,7 @@ def run_named_query(
     return _to_json(payload)
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 def run_ad_hoc_query(
     connection_string: str,
     query: str,
@@ -765,7 +701,7 @@ def run_ad_hoc_query(
     return md
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 def inspect_model_metadata(
     connection_string: str,
     preview_rows: int = DEFAULT_PREVIEW_ROWS,
@@ -799,7 +735,7 @@ def inspect_model_metadata(
     return _to_json(results)
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 def search_columns(
     connection_name: str,
     search_term: str,
@@ -900,7 +836,7 @@ def search_columns(
     return _to_json(matches[:max_results])
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 def search_measures(
     connection_name: str,
     search_term: str,
@@ -1499,7 +1435,7 @@ def save_to_workstation(
     })
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 def list_workstation(
     connections_dir: str = DEFAULT_CONNECTIONS_DIR,
 ) -> str:
@@ -1536,7 +1472,7 @@ def list_workstation(
     })
 
 
-@mcp.tool()
+@mcp.tool(annotations={"destructiveHint": True})
 def remove_from_workstation(
     query_name: str,
     connections_dir: str = DEFAULT_CONNECTIONS_DIR,
@@ -1564,7 +1500,7 @@ def remove_from_workstation(
     })
 
 
-@mcp.tool()
+@mcp.tool(annotations={"destructiveHint": True})
 def clear_workstation(
     connections_dir: str = DEFAULT_CONNECTIONS_DIR,
 ) -> str:

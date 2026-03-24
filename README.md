@@ -1,61 +1,29 @@
 # dax-query-mcp
 
-`dax-query-mcp` is a Windows-first Python package and MCP server for running DAX and metadata queries against Power BI / Analysis Services semantic models.
+MCP server for running DAX queries against Power BI semantic models.
 
-It supports:
+## Features
 
-- a CLI for running configured queries
-- a first-class query-builder save flow for `.dax` + `.dax.queryBuilder`
-- a connection-centric MCP server for AI clients
-- optional markdown context files per connection
-- scaffolding portable Python workspaces from validated DAX queries
-
----
-
-<!-- LLM-INSTRUCTIONS-START
-These instructions are for AI assistants (Copilot, Claude, etc.) using this MCP server.
-
-## Workflow
-
-1. Call `list_connections` to discover available connections.
-2. If a connection has `has_context_markdown=true`, call `get_connection_context`
-   to read its curated column/measure/filter docs BEFORE writing any DAX.
-3. Write DAX queries using `run_connection_query` or `run_connection_query_markdown`.
-4. After showing results, always render the "What would you like to do next?" list
-   from `response_markdown` EXACTLY as-is — do NOT summarize or omit it.
-
-## Rules
-
-- NEVER use `INFO.*()` or `$SYSTEM.DISCOVER_*` queries — they require admin
-  privileges and will fail for most users. Use `get_connection_context` instead.
-- Safe metadata queries use `$SYSTEM.MDSCHEMA_*` rowsets (used by `inspect_connection`).
-- Before calling `save_query_builder` or `scaffold_dax_workspace`, you MUST ask
-  the user where to save. Both tools will error if you pick a path yourself.
-- Before calling `save_query_builder`, call `get_query_builder_schema` first to
-  see the required JSON payload shape.
-
-LLM-INSTRUCTIONS-END -->
+- **Connection-centric MCP server** — discover models, query with DAX, inspect schemas
+- **Curated context** — teach the LLM your model via markdown docs (no admin privileges needed)
+- **Fuzzy search** — search columns and measures across tables by name or description
+- **Export anywhere** — CSV, clipboard, Power Query M code, Streamlit apps, standalone Python projects
+- **Query builder** — save `.dax` + `.dax.queryBuilder` artifacts, open directly in DAX Studio
+- **Workstation session** — save, list, and batch-export queries during an exploration session
 
 ## Quick start
 
 ### 1. Install
 
 ```bash
-uv sync
+uv pip install dax-query-mcp
 ```
 
-Sanity check:
+### 2. Add a connection
 
-```bash
-uv run dax-query --help
-```
-
-### 2. Add your connection
-
-Create a YAML file in `Connections/` with your Power BI connection string:
+Create `Connections/my_model.yaml`:
 
 ```yaml
-# Connections/my_model.yaml
 connection_string: |
   Provider=MSOLAP.8;
   Data Source=powerbi://api.powerbi.com/v1.0/myorg/MyWorkspace?readonly;
@@ -65,332 +33,127 @@ description: "My semantic model"
 command_timeout_seconds: 1800
 ```
 
-Optionally add a markdown context file alongside it. This is how you teach the
-LLM about your model's tables, columns, measures, and business logic — without
-needing admin privileges on the server:
+Optionally add `Connections/my_model.md` alongside it to document tables, measures, and common filters for the LLM.
 
-```md
-<!-- Connections/my_model.md -->
-# My Semantic Model
+### 3. Wire up MCP
 
-## Key tables
-- `Calendar` — Fiscal Month, Fiscal Year, Relative Year
-- `Account` — Top Parent, TPID, Account Name
-
-## Key measures
-- [Azure Consumed Revenue] — total ACR
-- [Avg Daily Azure Consumed Revenue] — daily average
-
-## Common filters
-- 'ACR Adjustment Type'[ACR Adjustment Type Group] = "N/A + Other"
-- 'Azure Anomaly Flag'[ACR Anomaly Flag] = "With Anomaly Adjustments"
-```
-
-### 3. Wire up MCP in your workspace
-
-Add the server to your workspace `.copilot/mcp.json` so Copilot (or any MCP
-client) discovers it automatically:
+Add to `.copilot/mcp.json` (or your MCP client config):
 
 ```json
 {
   "mcpServers": {
     "dax-query-server": {
       "command": "uvx",
-      "args": [
-        "--refresh-package",
-        "dax-query-mcp",
-        "--from",
-        "C:\\path\\to\\dax-query-mcp",
-        "dax-query-server"
-      ],
+      "args": ["dax-query-mcp", "dax-query-server"],
       "env": {
-        "DAX_QUERY_MCP_CONNECTIONS_DIR": "C:\\path\\to\\dax-query-mcp\\Connections"
+        "DAX_QUERY_MCP_CONNECTIONS_DIR": "C:\\absolute\\path\\to\\Connections"
       }
     }
   }
 }
 ```
 
-> **Tip:** Set `DAX_QUERY_MCP_CONNECTIONS_DIR` to the absolute path of your
-> `Connections/` folder. This lets you keep connections in one place and reference
-> them from any workspace.
+> **Tip:** `DAX_QUERY_MCP_CONNECTIONS_DIR` lets you share one `Connections/` folder across workspaces.
 
-Using `--refresh-package dax-query-mcp` is recommended for local-path MCP
-development so `uvx` does not keep serving a stale cached tool environment after
-you add or rename tools.
+### 4. Run your first query
 
-## Requirements
+Ask Copilot (or any MCP client):
 
-- Windows (COM/ADODB used for DAX execution)
-- `MSOLAP` / Analysis Services client libraries installed
-- Python 3.12+
-- `uv`
+> "List connections, then run a DAX query against my model."
 
-If the provider is missing, runtime errors will point to the Microsoft client library install page.
+The server returns plain markdown — results render as tables directly in chat.
 
-## MCP tools
-
-| Tool | Purpose |
-|------|---------|
-| `list_connections` | Discover available connections |
-| `get_connection_context` | Read curated markdown context (tables, columns, measures) — **use this instead of admin queries** |
-| `run_connection_query` | Execute a DAX query, get structured JSON + markdown preview |
-| `run_connection_query_markdown` | Execute a DAX query, get markdown-only response |
-| `inspect_connection` | Live schema discovery via safe `$SYSTEM.MDSCHEMA_*` rowsets |
-| `get_query_builder_schema` | Get the JSON shape needed for `save_query_builder` |
-| `save_query_builder` | Save `.dax` + `.dax.queryBuilder` artifacts |
-| `get_query_builder` | Load a previously saved query builder definition |
-| `scaffold_dax_workspace` | Export a portable Python project from a validated DAX query |
-
-> **Admin queries are blocked.** `INFO.HIERARCHIES()`, `INFO.MEASURES()`, and
-> `$SYSTEM.DISCOVER_*` require server admin rights and will fail for most users.
-> Use `get_connection_context` for metadata discovery.
-
-### Connection YAML options
+## Connection YAML
 
 ```yaml
 connection_string: "..."       # required — MSOLAP connection string
 description: "..."             # human-readable label
 command_timeout_seconds: 1800  # DAX query timeout
 connection_timeout_seconds: 300 # connection open timeout
-max_rows: null                 # global row cap (null = unlimited)
-# Optional MCP workflow hints:
-# suggested_skill: "enrollment-skills"
-# suggested_skill_reason: "Use for KQL against canonical enrollment data."
+max_rows: null                 # row cap (null = unlimited)
+suggested_skill: "..."         # optional — hint an MCP client toward a specific skill
+suggested_skill_reason: "..."  # optional — why that skill is relevant
 ```
 
-If a connection YAML includes `suggested_skill` and `suggested_skill_reason`,
-both `list_connections` and `get_connection_context` will surface that hint so an
-MCP client can steer the user toward the right workflow.
+## MCP tools
 
-The query and metadata MCP tools also return a `presentation_hint` plus a
-`markdown_table` preview so Copilot-style clients can render result previews
-as markdown tables.
+| Tool | Purpose |
+|------|---------|
+| **Discovery** | |
+| `list_connections` | Discover available connections |
+| `get_connection_context` | Curated markdown context (tables, columns, measures) |
+| `search_connection_context` | Search context docs for specific terms |
+| `inspect_connection` | Live schema via safe `MDSCHEMA` rowsets |
+| **Querying** | |
+| `run_connection_query` | Run DAX against a named connection |
+| `run_ad_hoc_query` | Run DAX against a raw connection string |
+| **Search** | |
+| `search_columns` | Fuzzy-search columns across tables |
+| `search_measures` | Fuzzy-search measures by name or expression |
+| **Export** | |
+| `export_to_csv` | Export results to a timestamped CSV |
+| `copy_to_clipboard` | Copy results to clipboard (TSV or markdown) |
+| `scaffold_power_query` | Generate Power Query M code for Excel |
+| `scaffold_streamlit_app` | Generate a Streamlit visualization app |
+| `scaffold_dax_workspace` | Scaffold a standalone Python project |
+| `quick_chart` | Render a bar/line/pie chart as PNG |
+| **Query builder** | |
+| `save_query_builder` | Save `.dax` + `.dax.queryBuilder` artifacts |
+| `get_query_builder` | Load a saved query builder definition |
+| `get_query_builder_schema` | Get the expected JSON payload shape |
+| **Workstation** | |
+| `save_to_workstation` | Save a query to the session workstation |
+| `list_workstation` | List saved workstation queries |
+| `export_workstation` | Batch-export workstation as scaffold or `.dax` files |
+
+> **Admin queries are blocked.** `INFO.*()` and `$SYSTEM.DISCOVER_*` require server admin rights.
+> Use `get_connection_context` or `inspect_connection` for metadata.
 
 ## CLI usage
 
-The CLI is query-file based. It uses `queries\`, while the MCP server uses `Connections\`.
-
-On first use, scaffold a sample query file:
-
 ```bash
-uv run dax-query --list --config-dir queries
+# List configured queries
+dax-query --list --config-dir queries
+
+# Run a query
+dax-query --query my_query --preview --config-dir queries
+
+# Inspect a connection schema
+dax-query --inspect-connection my_model --connections-dir Connections
+
+# Save a query builder artifact
+dax-query-builder --save-query-builder-from builder.json --config-dir queries
 ```
 
-That command creates `queries\sample_query.yaml` if the folder does not exist yet.
-
-Edit the generated file with your real connection string and DAX, then run:
-
-```bash
-uv run dax-query --query sample_query --preview --config-dir queries
-```
-
-Do not run the scaffolded sample unchanged; it contains placeholder connection details.
-
-To inspect a semantic model schema without writing raw `$SYSTEM...` rowset queries in PowerShell, use the built-in connection inspection command:
-
-```bash
-uv run dax-query --inspect-connection your_connection --connections-dir Connections --preview-rows 20
-```
-
-This avoids shell-quoting issues around `$SYSTEM` tokens and uses the same non-admin metadata path as the MCP server.
-
-### Query builder artifacts
-
-You can save a structured query definition as both:
-
-- `queries\my_query.dax`
-- `queries\my_query.dax.queryBuilder`
-
-The sidecar uses JSON and stores the query-builder state separately from the generated DAX text.
-
-Example builder definition:
-
-```json
-{
-  "name": "monthly_revenue",
-  "connection_name": "your_connection",
-  "description": "Monthly revenue by TPID",
-  "columns": [
-    "'Calendar'[Fiscal Month]",
-    "'Account Information'[TPID]"
-  ],
-  "measures": [
-    {
-      "caption": "Revenue",
-      "expression": "[Total Revenue]"
-    }
-  ],
-  "filters": [
-    {
-      "expression": "'Calendar'[Fiscal Year]",
-      "operator": "=",
-      "value": 2026
-    }
-  ],
-  "order_by": [
-    {
-      "expression": "'Calendar'[Fiscal Month]",
-      "direction": "ASC"
-    }
-  ]
-}
-```
-
-Save it with:
-
-```bash
-uv run dax-query --save-query-builder-from builder.json --config-dir queries
-```
-
-There is also a dedicated alias if you want to surface the builder workflow more explicitly:
-
-```bash
-uv run dax-query-builder --save-query-builder-from builder.json --config-dir queries
-```
-
-Saved query-builder artifacts are also loaded by the normal query loader, so they can be listed and run like other saved queries as long as the referenced `connection_name` exists in `Connections\`.
-
-You can open the generated `.dax` file directly in **DAX Studio**. The accompanying `.dax.queryBuilder` file is kept by `dax-query-mcp` as structured builder metadata.
-
-### Query → Generate → Open in DAX Studio
-
-The query builder workflow lets you go from a natural-language prompt or existing DAX query all the way to an interactive DAX Studio session:
-
-```mermaid
-flowchart LR
-    A["Natural Language\nor DAX Query"] -->|MCP / CLI / Copilot| B["Generate\nand Validate"]
-    B -->|save_query_builder| C[".dax +\n.queryBuilder"]
-    C -->|double-click or\nFile - Open| D["DAX Studio\nQuery Builder"]
-    D -->|edit / profile / run| E["Results"]
-
-    style A fill:#4B8BBE,color:#fff
-    style B fill:#306998,color:#fff
-    style C fill:#FFD43B,color:#000
-    style D fill:#2B579A,color:#fff
-    style E fill:#217346,color:#fff
-```
-
-1. **Write or generate a query** — use the MCP `run_connection_query` tool, the CLI, or ask Copilot to build a DAX query for you.
-2. **Save as a query-builder artifact** — call `save_query_builder` (MCP) or `dax-query-builder --save-query-builder-from` (CLI) to persist the query as a `.dax` + `.dax.queryBuilder` pair.
-3. **Open in DAX Studio** — double-click the `.dax` file or use *File → Open* in DAX Studio. The query loads into DAX Studio's Query Builder tab with columns, measures, and filters pre-populated.
-
-This means you can iterate on queries inside Copilot, save them, and immediately switch to DAX Studio for visual editing, profiling, or execution against your semantic model.
-
-### Excel Pivot → DAX (power use case)
-
-If you already have an Excel PivotTable connected to a Power BI semantic model, you can convert it to a portable DAX query:
-
-```mermaid
-flowchart TD
-    A["Excel PivotTable"] --> B["Copy Layout\nRows - Columns - Values - Filters"]
-    B --> C["Paste into Copilot"]
-    C --> D["Auto-Generate DAX\nSUMMARIZECOLUMNS +\nKEEPFILTERS / TREATAS"]
-    D --> E["save_query_builder\n.dax + .queryBuilder"]
-    E --> F["Open in DAX Studio\nQuery Builder tab"]
-
-    style A fill:#217346,color:#fff
-    style B fill:#217346,color:#fff
-    style C fill:#4B8BBE,color:#fff
-    style D fill:#306998,color:#fff
-    style E fill:#FFD43B,color:#000
-    style F fill:#2B579A,color:#fff
-```
-
-1. **Copy your pivot layout** — note the fields on Rows/Columns, the measures in Values, and any active slicer/filter selections.
-2. **Paste into Copilot** — describe (or paste) the field names, measures, and filter values. For example:
-   > "My pivot has Fiscal Month on rows, Top Parent on rows, Azure Consumed Revenue as the value, filtered to Relative Year = CY and Strategic Pillar = GitHub Copilot."
-3. **Generate the DAX** — Copilot (via the MCP tools) produces a `SUMMARIZECOLUMNS` query with `KEEPFILTERS`/`TREATAS` filters matching your pivot selections.
-4. **Save and open in DAX Studio** — use `save_query_builder` to get a `.dax` file you can open directly in DAX Studio's Query Builder for further tweaking.
-
-This is especially useful when you want to move beyond Excel's refresh-and-wait cycle, inspect the underlying data at full fidelity, or share a reproducible query with teammates who don't use the same workbook.
-
-### Export as Portable Workspace
-
-Once you're happy with a DAX query, you can scaffold a self-contained project folder — ready to share, run with `uv run`, or paste into a notebook:
-
-```mermaid
-flowchart LR
-    A["Validated\nDAX Query"] -->|scaffold| B["my-project/"]
-    B --> C["run_query.py"]
-    B --> D["queries/query.dax"]
-    B --> E["pyproject.toml"]
-
-    style A fill:#217346,color:#fff
-    style B fill:#FFD43B,color:#000
-    style C fill:#4B8BBE,color:#fff
-    style D fill:#306998,color:#fff
-    style E fill:#306998,color:#fff
-```
-
-**Via MCP:**
-```
-scaffold_dax_workspace(
-    output_dir="./my-copilot-analysis",
-    query_text="EVALUATE SUMMARIZECOLUMNS(...)",
-    query_name="copilot-acr",
-    connection_name="ahr_connection"   # optional — embeds the connection string
-)
-```
-
-**Via CLI:**
-```bash
-dax-query --scaffold ./my-copilot-analysis \
-          --scaffold-query queries/copilot-acr.dax \
-          --scaffold-project-name copilot-acr-analysis
-```
-
-The generated `run_query.py` is ~40 lines of self-contained Python — no external dependencies beyond `pywin32` and `pandas`. Copy the `dax_to_pandas()` function straight into a Jupyter or Fabric notebook cell.
-
-## Packaging
-
-Build locally with:
-
-```bash
-uv build
-```
+Saved `.dax` files open directly in **DAX Studio**. See `docs/` for detailed CLI documentation.
 
 ## Copilot guard hook
 
-This repo includes a `pre-commit` hook that uses deterministic rules plus GitHub Copilot CLI to review staged changes for likely private/internal content before you commit.
-
-Install it with:
+A `pre-commit` hook reviews staged changes for private content (real workspace URIs, local paths, non-sample connection files).
 
 ```powershell
+# Install
 powershell -ExecutionPolicy Bypass -File .\scripts\install-git-hooks.ps1
+
+# Runs automatically on commit:
+dax-query-guard --mode staged
 ```
 
-The hook runs:
-
-```bash
-uv run dax-query-guard --mode staged
-```
-
-Tracked defaults:
-
-- blocks non-sample files under `Connections\`
-- flags likely real `powerbi://api.powerbi.com/v1.0/myorg/...` workspace URIs
-- flags concrete `C:\Users\...` local paths
-
-For repo-specific private identifiers, create a local ignored file named `.copilot-guard.local.json`.
-
-Example:
+Add repo-specific patterns via `.copilot-guard.local.json`:
 
 ```json
 {
   "blocked_content_patterns": [
-    {
-      "pattern": "PrivateWorkspace|InternalDataset|private_connection",
-      "reason": "Internal semantic model identifiers"
-    }
+    { "pattern": "PrivateWorkspace|InternalDataset", "reason": "Internal identifiers" }
   ]
 }
 ```
 
-If Copilot CLI is unavailable or returns invalid output, the hook fails closed by default. Set `COPILOT_GUARD_FAIL_OPEN=1` to allow commits through on Copilot runtime failures.
+Fails closed by default. Set `COPILOT_GUARD_FAIL_OPEN=1` to allow commits when Copilot CLI is unavailable.
 
-## Notes
+## Requirements
 
-- This public copy includes only generic sample connections and context.
-- `.gitignore` is set up to keep local `queries\` files and real `Connections\` configs/context out of Git by default, while still allowing the sample connection files to stay in the repo.
-- No private semantic model names, user paths, or personal connection files should be added before publishing.
+- **Windows** (COM/ADODB used for DAX execution)
+- **MSOLAP** / Analysis Services client libraries
+- **Python 3.12+**
+- **uv**

@@ -5,7 +5,7 @@ and $SYSTEM.MDSCHEMA_* metadata queries are allowed.
 """
 
 import pytest
-from mcp.server.fastmcp.exceptions import ToolError
+from fastmcp.exceptions import ToolError
 
 from dax_query_mcp.mcp_server import validate_dax_query
 

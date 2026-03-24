@@ -1,10 +1,6 @@
-connection_string: |
-  Provider=MSOLAP.8;
-  Data Source=powerbi://api.powerbi.com/v1.0/myorg/SampleWorkspace?readonly;
-  Initial Catalog=SampleSemanticModel
+# Sample connection — uses the built-in mock cube so you can test immediately
+# Replace with your real Power BI connection string when ready
 
-description: "Sample semantic model connection"
-# Optional MCP workflow hint
-# suggested_skill: "enrollment-skills"
-# suggested_skill_reason: "Use this when you want help drafting KQL against canonical enrollment data."
-command_timeout_seconds: 1800
+connection_string: "MOCK://contoso"
+description: "Mock Contoso Sales cube (works out of the box, no Power BI needed)"
+command_timeout_seconds: 300

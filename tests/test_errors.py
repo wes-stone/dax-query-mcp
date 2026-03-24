@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 
 import pytest
-from mcp.server.fastmcp.exceptions import ToolError
+from fastmcp.exceptions import ToolError
 
 from dax_query_mcp.errors import (
     ADMIN_QUERY_BLOCKED,

@@ -1,0 +1,104 @@
+version: "1.0"
+
+tables:
+  - name: Products
+    description: Dimension table of products sold by Contoso
+    columns:
+      - name: ProductKey
+        data_type: integer
+        description: Unique product identifier
+        sample_values: ["1", "2", "3"]
+      - name: ProductName
+        data_type: string
+        description: Display name of the product
+        sample_values: ["Mountain Bike", "Road Bike", "Helmet"]
+      - name: Category
+        data_type: string
+        description: Product category
+        sample_values: ["Bikes", "Accessories"]
+      - name: Price
+        data_type: decimal
+        description: Unit price in USD
+        sample_values: ["1500.00", "249.99"]
+
+  - name: Calendar
+    description: Date dimension table (2025)
+    columns:
+      - name: DateKey
+        data_type: integer
+        description: Surrogate key for the date
+      - name: Date
+        data_type: datetime
+        description: Calendar date
+      - name: Month
+        data_type: string
+        description: Month name
+        sample_values: ["January", "February", "March"]
+      - name: MonthNum
+        data_type: integer
+        description: Month number (1-12)
+      - name: Year
+        data_type: integer
+        description: Calendar year
+        sample_values: ["2025"]
+      - name: Weekday
+        data_type: string
+        description: Day of the week
+        sample_values: ["Monday", "Tuesday", "Wednesday"]
+
+  - name: Sales
+    description: Fact table with individual sales transactions
+    columns:
+      - name: SalesKey
+        data_type: integer
+        description: Unique transaction identifier
+      - name: ProductKey
+        data_type: integer
+        description: Foreign key to Products table
+      - name: DateKey
+        data_type: integer
+        description: Foreign key to Calendar table
+      - name: Quantity
+        data_type: integer
+        description: Number of units sold
+        sample_values: ["1", "3", "5"]
+      - name: Amount
+        data_type: decimal
+        description: Transaction amount in USD
+        sample_values: ["1500.00", "749.97", "499.98"]
+
+measures:
+  - name: Total Sales
+    expression: SUM(Sales[Amount])
+    description: Sum of all sales amounts
+    format_string: "$#,##0.00"
+  - name: Total Quantity
+    expression: SUM(Sales[Quantity])
+    description: Total units sold
+    format_string: "#,##0"
+  - name: Avg Price
+    expression: AVERAGE(Products[Price])
+    description: Average product price
+    format_string: "$#,##0.00"
+  - name: Product Count
+    expression: COUNTROWS(Products)
+    description: Number of distinct products
+    format_string: "#,##0"
+  - name: Day Count
+    expression: COUNTROWS(Calendar)
+    description: Number of days in the calendar
+    format_string: "#,##0"
+
+filters:
+  - name: Category Filter
+    column: Products[Category]
+    description: Filter by product category
+    suggested_values: ["Bikes", "Accessories"]
+  - name: Year Filter
+    column: Calendar[Year]
+    description: Filter by calendar year
+    suggested_values: ["2025"]
+  - name: Month Filter
+    column: Calendar[Month]
+    description: Filter by month name
+    suggested_values: ["January", "February", "March"]

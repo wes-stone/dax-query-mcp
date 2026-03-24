@@ -14,5 +14,8 @@ Connections/*.yml
 Connections/*.md
 !Connections/sample_connection.yaml
 !Connections/sample_connection.md
+!Connections/mock_contoso.yaml
+!Connections/mock_contoso.md
+!Connections/mock_contoso.data_dictionary.yaml
 !queries/sample_query.yaml
 .copilot-guard.local.json

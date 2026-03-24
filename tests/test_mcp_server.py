@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 
 import pandas as pd
-from mcp.server.fastmcp.exceptions import ToolError
+from fastmcp.exceptions import ToolError
 
 from dax_query_mcp.mcp_server import (
     _FOLLOWUP_MENU,
@@ -1089,7 +1089,10 @@ from dax_query_mcp.mcp_server import mcp as _mcp_server
 
 def _get_mcp_tool_functions():
     """Return (name, func) pairs for every @mcp.tool()-registered function."""
-    return [(name, tool.fn) for name, tool in _mcp_server._tool_manager._tools.items()]
+    import asyncio
+    lp = getattr(_mcp_server, '_local_provider', None) or getattr(_mcp_server, 'local_provider', None)
+    tools = asyncio.run(lp.list_tools())
+    return [(t.name, t.fn) for t in tools]
 
 
 _PLACEHOLDER_PREFIXES = ("todo", "fixme", "hack", "xxx", "placeholder")
