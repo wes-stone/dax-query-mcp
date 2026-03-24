@@ -644,11 +644,10 @@ def test_server_instructions_contains_error_codes() -> None:
 
 
 def test_server_instructions_contains_follow_up_options() -> None:
-    """_SERVER_INSTRUCTIONS must list follow-up actions."""
+    """_SERVER_INSTRUCTIONS must describe follow-up behaviour."""
     assert "## Follow-up options" in _SERVER_INSTRUCTIONS
-    assert "export_to_csv" in _SERVER_INSTRUCTIONS
-    assert "copy_to_clipboard" in _SERVER_INSTRUCTIONS
-    assert "scaffold" in _SERVER_INSTRUCTIONS.lower()
+    assert "What would you like" in _SERVER_INSTRUCTIONS or "next?" in _SERVER_INSTRUCTIONS.lower()
+    assert "verbatim" in _SERVER_INSTRUCTIONS.lower() or "baked" in _SERVER_INSTRUCTIONS.lower()
 
 
 # ── search_columns tests ────────────────────────────────────────────

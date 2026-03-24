@@ -30,8 +30,17 @@ Call `get_connection_context` with the connection name. This returns the schema 
 - **NEVER** launch explore agents to find connection files or read .yaml files.
 - **NEVER** read run_query.py or dax_to_pandas source code to figure out how to query.
 - **ALWAYS** use `run_connection_query` to execute queries.
-- **ALWAYS** show the result table and the next_steps list after every query.
 - Call `get_connection_context` once per session — don't re-read it every turn.
+
+## Output rendering (CRITICAL)
+
+When `run_connection_query`, `run_ad_hoc_query`, or `run_named_query` returns
+a result, output the **entire returned string** as your response. This overrides
+any general brevity guidelines. Specifically:
+
+1. The markdown table must appear as a **table**, not bullet points.
+2. The numbered "What would you like to do next?" list must appear in full.
+3. Do NOT add your own summary, commentary, or rephrased version of the data.
 
 ## Available tools (summary)
 

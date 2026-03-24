@@ -86,8 +86,10 @@ Power BI / Analysis Services semantic models.
 
 1. ALWAYS EXECUTE queries — build the DAX AND call run_connection_query in \
 the same turn. Never just show query text without running it.
-2. Render the response_markdown field EXACTLY as-is after every query. \
-Do NOT summarize, paraphrase, or invent your own next-steps list.
+2. Query tools return a COMPLETE, pre-formatted markdown response. \
+Output the ENTIRE string verbatim as your response — including the data \
+table AND the numbered "What would you like to do next?" list. \
+Do NOT summarize, convert the table to bullet points, or omit the menu.
 3. NEVER generate admin queries (INFO.*(), $SYSTEM.DISCOVER_*, DBCC, \
 ALTER, CREATE, DELETE, DROP). Use get_connection_context for metadata.
 
@@ -126,9 +128,9 @@ ALTER, CREATE, DELETE, DROP). Use get_connection_context for metadata.
 
 ## Follow-up options after query results
 
-Present the next_steps list from the response. Key actions: \
-export_to_csv, copy_to_clipboard, save_to_workstation, quick_chart, \
-scaffold_power_query, scaffold_streamlit_app, scaffold_dax_workspace.
+The query tool output already includes the numbered "What would you like \
+to do next?" list. Do NOT generate your own version — the list is baked \
+into the tool response and must appear exactly as returned.
 """
 
 mcp = FastMCP("dax-query-server", instructions=_SERVER_INSTRUCTIONS)
@@ -441,9 +443,10 @@ def run_connection_query(
 ) -> str:
     """Run a DAX query against a named connection.
 
-    Returns a markdown string containing the data table and a numbered
-    'What next?' menu. Present the returned text to the user as-is.
-    Set profile=true to include per-phase timing information.
+    IMPORTANT: This tool returns a COMPLETE, pre-formatted response for the
+    user. Output the returned string as your ENTIRE response — do NOT
+    summarize, truncate, or convert the table to bullet points. The output
+    includes a data table and a numbered follow-up menu that must both appear.
     """
     validate_dax_query(query)
     connection = _get_connection(connection_name, connections_dir)
@@ -626,8 +629,10 @@ def run_named_query(
 ) -> str:
     """Run a pre-configured named query and return a preview.
 
-    Present the markdown_table as a table and the next_steps list as a
-    numbered list after every result.
+    IMPORTANT: This tool returns a COMPLETE, pre-formatted response for the
+    user. Output the returned string as your ENTIRE response — do NOT
+    summarize, truncate, or convert the table to bullet points. The output
+    includes a data table and a numbered follow-up menu that must both appear.
     """
     from .pipeline import DAXPipeline
 
@@ -645,21 +650,10 @@ def run_named_query(
         )
 
     summary = summarize_dataframe(dataframe, preview_rows=preview_rows)
-    response_markdown = _build_query_response_markdown(
+    return _build_query_response_markdown(
         title=f"Query preview for `{query_name}`",
         summary=summary,
     )
-    payload = {
-        "query_name": query_name,
-        "config_dir": config_dir,
-        "response_markdown": response_markdown,
-        "summary": {
-            "row_count": summary["row_count"],
-            "column_count": summary.get("column_count", len(summary.get("columns", []))),
-            "columns": summary.get("columns", []),
-        },
-    }
-    return _to_json(payload)
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
@@ -673,9 +667,10 @@ def run_ad_hoc_query(
 ) -> str:
     """Run a DAX query against a raw connection string.
 
-    Returns a markdown string containing the data table and a numbered
-    'What next?' menu. Present the returned text to the user as-is.
-    Set profile=true to include per-phase timing information.
+    IMPORTANT: This tool returns a COMPLETE, pre-formatted response for the
+    user. Output the returned string as your ENTIRE response — do NOT
+    summarize, truncate, or convert the table to bullet points. The output
+    includes a data table and a numbered follow-up menu that must both appear.
     """
     validate_dax_query(query)
     try:
@@ -926,17 +921,11 @@ def summarize_rowset(
     }
 
 
-_RENDER_DIRECTIVE = (
-    "<!-- RENDER EXACTLY: Show the table and numbered list below verbatim. "
-    "Do NOT rewrite, summarize, or rephrase the 'What next?' list. -->\n\n"
-)
-
 
 def _build_query_response_markdown(*, title: str, summary: dict[str, Any]) -> str:
     column_count = summary.get("column_count", len(summary.get("columns", [])))
     next_steps_md = "\n".join(f"{i+1}. {step}" for i, step in enumerate(_NEXT_STEPS))
     return (
-        f"{_RENDER_DIRECTIVE}"
         f"### {title}\n\n"
         f"- Rows: {summary['row_count']}\n"
         f"- Columns: {column_count}\n\n"

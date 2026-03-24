@@ -355,18 +355,34 @@ class TestQueryExecution:
         )
 
     def test_response_contains_next_steps(self, query_result: dict[str, Any]) -> None:
-        """The LLM's final response must include next-step options."""
-        final = query_result["final_response"].lower()
-        has_actionable = (
-            "filter" in final
-            or "refine" in final
-            or "csv" in final
-            or "export" in final
-            or "next" in final
-            or "would you like" in final
+        """The LLM's final response must include the numbered follow-up menu."""
+        final = query_result["final_response"]
+        final_lower = final.lower()
+
+        # Must contain the heading
+        has_heading = "what would you like to do next?" in final_lower
+
+        # Must contain at least 5 of the 11 numbered items
+        numbered_items_found = sum(
+            1 for i in range(1, 12) if f"{i}." in final
         )
-        assert has_actionable, (
-            f"No next-step options found in response: {query_result['final_response'][:500]}"
+
+        # Must contain specific action keywords from _NEXT_STEPS
+        has_filter = "filter" in final_lower or "refine" in final_lower
+        has_export = "csv" in final_lower or "export" in final_lower
+        has_chart = "chart" in final_lower
+
+        assert has_heading, (
+            f"Missing 'What would you like to do next?' heading. "
+            f"Response snippet: {final[:500]}"
+        )
+        assert numbered_items_found >= 5, (
+            f"Expected at least 5 numbered items (1. through 11.), "
+            f"found {numbered_items_found}. Response snippet: {final[:500]}"
+        )
+        assert has_filter and has_export and has_chart, (
+            f"Missing key action keywords (filter/export/chart). "
+            f"Response snippet: {final[:500]}"
         )
 
     def test_get_connection_context_called_before_query(
