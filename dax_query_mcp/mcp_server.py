@@ -926,8 +926,6 @@ def _build_query_response_markdown(*, title: str, summary: dict[str, Any]) -> st
     column_count = summary.get("column_count", len(summary.get("columns", [])))
     next_steps_md = "\n".join(f"{i+1}. {step}" for i, step in enumerate(_NEXT_STEPS))
     return (
-        f"⚠️ RENDER THIS OUTPUT EXACTLY AS-IS. Do NOT summarize, reformat, "
-        f"or omit any section including the table and the numbered menu below.\n\n"
         f"### {title}\n\n"
         f"- Rows: {summary['row_count']}\n"
         f"- Columns: {column_count}\n\n"
