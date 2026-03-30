@@ -1,5 +1,7 @@
 # dax-query-mcp
 
+[![PyPI](https://img.shields.io/pypi/v/dax-query-mcp)](https://pypi.org/project/dax-query-mcp/)
+
 MCP server for running DAX queries against Power BI semantic models.
 
 Check out [making use of skills and extensions](docs/dax-mcp-skill-and-extension-guide.md) for getting better results since the MCP can't do it all
