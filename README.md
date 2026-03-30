@@ -17,8 +17,18 @@ Check out [making use of skills and extensions](docs/dax-mcp-skill-and-extension
 
 ### 1. Install
 
+**From PyPI** (recommended):
+
 ```bash
 uv pip install dax-query-mcp
+```
+
+**From source** (for development or latest changes):
+
+```bash
+git clone https://github.com/wes-stone/dax-query-mcp.git
+cd dax-query-mcp
+uv sync
 ```
 
 ### 2. Add a connection
@@ -41,12 +51,30 @@ Optionally add `Connections/my_model.md` alongside it to document tables, measur
 
 Add to `.copilot/mcp.json` (or your MCP client config):
 
+**Using PyPI (via `uvx`):**
+
 ```json
 {
   "mcpServers": {
     "dax-query-server": {
       "command": "uvx",
       "args": ["dax-query-mcp", "dax-query-server"],
+      "env": {
+        "DAX_QUERY_MCP_CONNECTIONS_DIR": "C:\\absolute\\path\\to\\Connections"
+      }
+    }
+  }
+}
+```
+
+**Using a local clone:**
+
+```json
+{
+  "mcpServers": {
+    "dax-query-server": {
+      "command": "uv",
+      "args": ["run", "--directory", "C:\\path\\to\\dax-query-mcp", "dax-query-server"],
       "env": {
         "DAX_QUERY_MCP_CONNECTIONS_DIR": "C:\\absolute\\path\\to\\Connections"
       }
