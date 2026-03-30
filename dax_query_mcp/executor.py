@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from contextlib import suppress
 from datetime import datetime
 from typing import Callable, Iterator
@@ -135,16 +136,46 @@ class DAXExecutor:
             _safe_close(conn)
 
 
+def _ensure_com_initialized() -> None:
+    """Call CoInitialize on the current thread if not already done.
+
+    FastMCP dispatches sync tool functions on arbitrary anyio worker threads
+    via ``anyio.to_thread.run_sync``.  Each worker thread needs its own COM
+    initialisation — pywin32 only auto-initialises on the *first* thread that
+    touches COM.  Without this, the second (and subsequent) tool calls land on
+    a fresh thread and fail with ``CoInitialize has not been called``.
+
+    This is safe to call repeatedly: ``CoInitialize`` is a no-op if the
+    thread's apartment is already initialised (returns ``S_FALSE``).
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        import pythoncom
+
+        pythoncom.CoInitialize()
+    except Exception:
+        pass
+
+
+def _com_dispatch(prog_id: str) -> object:
+    """Create a COM object, ensuring the current thread is COM-initialised."""
+    _ensure_com_initialized()
+    import win32com.client
+
+    return win32com.client.Dispatch(prog_id)
+
+
 def _default_dispatcher() -> DispatchFn:
     try:
-        import win32com.client
+        import win32com.client  # noqa: F401 – validate availability
     except ImportError as exc:
         raise DAXExecutionError(
             "pywin32 is required to execute DAX queries. Install the project dependencies on Windows. "
             f"If ADODB/MSOLAP errors continue, install the Analysis Services client libraries: {MSOLAP_INSTALL_URL}"
         ) from exc
 
-    return win32com.client.Dispatch
+    return _com_dispatch
 
 
 def get_dispatcher_for_connection(connection_string: str) -> DispatchFn:
