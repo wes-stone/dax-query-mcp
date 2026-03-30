@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dax-query-mcp"
-version = "0.2.0"
+version = "0.2.1"
 description = "Windows-first DAX and MCP toolkit for Power BI semantic models"
 readme = "README.md"
 requires-python = ">=3.12"

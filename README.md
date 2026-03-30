@@ -13,6 +13,23 @@ Check out [making use of skills and extensions](docs/dax-mcp-skill-and-extension
 - **Query builder** — save `.dax` + `.dax.queryBuilder` artifacts, open directly in DAX Studio
 - **Workstation session** — save, list, and batch-export queries during an exploration session
 
+## Prerequisites
+
+1. **Windows** — the server uses COM/ADODB under the hood, so it's Windows-only.
+2. **MSOLAP provider** — the OLE DB driver that talks to Power BI semantic models.
+   Download from [Microsoft](https://learn.microsoft.com/en-us/analysis-services/client-libraries?view=asallproducts-allversions) — grab the **"AMO + ADOMD.NET"** or **"MSOLAP (OLE DB)"** installer. If you already have Power BI Desktop, Excel with Power Pivot, or SSMS installed, you likely have it.
+   
+   To check: open PowerShell and run:
+   ```powershell
+   (New-Object System.Data.OleDb.OleDbEnumerator).GetElements() | Where-Object { $_.SOURCES_NAME -like "*MSOLAP*" }
+   ```
+   If that returns a row, you're good.
+
+3. **uv** — Python package manager. Install with:
+   ```powershell
+   winget install astral-sh.uv
+   ```
+
 ## Quick start
 
 ### 1. Install
@@ -20,7 +37,7 @@ Check out [making use of skills and extensions](docs/dax-mcp-skill-and-extension
 **From PyPI** (recommended):
 
 ```bash
-uv pip install dax-query-mcp
+uvx --from dax-query-mcp dax-query-server
 ```
 
 **From source** (for development or latest changes):
@@ -58,7 +75,7 @@ Add to `.copilot/mcp.json` (or your MCP client config):
   "mcpServers": {
     "dax-query-server": {
       "command": "uvx",
-      "args": ["dax-query-mcp", "dax-query-server"],
+      "args": ["--from", "dax-query-mcp", "dax-query-server"],
       "env": {
         "DAX_QUERY_MCP_CONNECTIONS_DIR": "C:\\absolute\\path\\to\\Connections"
       }
@@ -187,6 +204,6 @@ Fails closed by default. Set `COPILOT_GUARD_FAIL_OPEN=1` to allow commits when C
 ## Requirements
 
 - **Windows** (COM/ADODB used for DAX execution)
-- **MSOLAP** / Analysis Services client libraries
-- **Python 3.12+**
-- **uv**
+- **MSOLAP** OLE DB provider (see [Prerequisites](#prerequisites))
+- **Python 3.12+** (handled automatically by `uvx`)
+- **uv** (`winget install astral-sh.uv`)
