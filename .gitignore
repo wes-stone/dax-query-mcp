@@ -19,3 +19,5 @@ Connections/*.md
 !Connections/mock_contoso.data_dictionary.yaml
 !queries/sample_query.yaml
 .copilot-guard.local.json
+*.csv
+*.xlsx

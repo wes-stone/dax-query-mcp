@@ -328,7 +328,7 @@ wheels = [
 
 [[package]]
 name = "dax-query-mcp"
-version = "0.1.0"
+version = "0.2.1"
 source = { editable = "." }
 dependencies = [
     { name = "fastmcp" },
@@ -337,7 +337,7 @@ dependencies = [
     { name = "pandas" },
     { name = "pydantic" },
     { name = "pyperclip" },
-    { name = "pywin32" },
+    { name = "pywin32", marker = "sys_platform == 'win32'" },
     { name = "pyyaml" },
     { name = "rich" },
 ]
@@ -355,7 +355,7 @@ requires-dist = [
     { name = "pandas", specifier = ">=2.3.0" },
     { name = "pydantic", specifier = ">=2.0.0" },
     { name = "pyperclip", specifier = ">=1.9.0" },
-    { name = "pywin32", specifier = ">=310" },
+    { name = "pywin32", marker = "sys_platform == 'win32'", specifier = ">=310" },
     { name = "pyyaml", specifier = ">=6.0.2" },
     { name = "rich", specifier = ">=13.0.0" },
 ]
