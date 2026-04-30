@@ -1596,6 +1596,7 @@ _MULTI_PYPROJECT_TEMPLATE = textwrap.dedent("""\
     description = "DAX workstation — exported queries"
     requires-python = ">=3.12"
     dependencies = [
+        "ipykernel>=6.29.0",
         "pandas>=2.3.0",
         "pywin32>=310",
         "rich>=13.0.0",

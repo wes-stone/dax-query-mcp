@@ -1331,6 +1331,9 @@ def test_export_workstation_scaffold(tmp_path) -> None:
     assert "revenue" in run_script
     assert "cost" in run_script
 
+    pyproject = (out_dir / "pyproject.toml").read_text(encoding="utf-8")
+    assert "ipykernel" in pyproject
+
 
 def test_export_workstation_dax(tmp_path) -> None:
     """Exports only .dax files in dax format."""
