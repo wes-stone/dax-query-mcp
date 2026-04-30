@@ -50,9 +50,14 @@ cd dax-query-mcp
 uv sync
 ```
 
-### 2. Add a connection
+### 2. Add a connection bundle
 
-Create `Connections/my_model.yaml`:
+Each model is represented by a small **connection bundle** in `Connections/`.
+The YAML file provides access to the model; the companion context files are the
+layer that makes Copilot useful because they explain the model in business terms.
+
+Create `Connections/my_model.yaml` for the connection string and runtime
+settings:
 
 ```yaml
 connection_string: |
@@ -64,7 +69,25 @@ description: "My semantic model"
 command_timeout_seconds: 1800
 ```
 
-Optionally add `Connections/my_model.md` alongside it to document tables, measures, and common filters for the LLM.
+Then add context files with the same connection name:
+
+| File | Purpose |
+| ---- | ------- |
+| `Connections/my_model.yaml` | Required connection string, description, timeouts, and row limits. |
+| `Connections/my_model_overview.md` | Optional compact overview used first by `get_connection_context`; include the most important tables, measures, filters, and example queries. |
+| `Connections/my_model.md` | Optional full model context; include detailed table notes, business definitions, caveats, relationships, and query patterns. |
+| `Connections/my_model.data_dictionary.yaml` | Optional structured dictionary used by `get_data_dictionary`, `get_schema`, `search_columns`, and `search_measures`; include tables, columns, measures, filters, descriptions, and sample values. |
+
+Recommended setup flow:
+
+1. Create the `.yaml` connection file.
+2. Add a short `_overview.md` so Copilot can quickly understand the model before writing DAX.
+3. Add the fuller `.md` context for detailed business logic, naming conventions, and examples.
+4. Add or generate the `.data_dictionary.yaml` so tools can search fields and measures structurally.
+
+You can create the dictionary manually or scaffold one from the live model with
+the `generate_data_dictionary` MCP tool, then fill in business descriptions and
+sample values.
 
 ### 3. Wire up MCP
 
@@ -122,6 +145,53 @@ connection_timeout_seconds: 300 # connection open timeout
 max_rows: null # row cap (null = unlimited)
 suggested_skill: "..." # optional — hint an MCP client toward a specific skill
 suggested_skill_reason: "..." # optional — why that skill is relevant
+```
+
+## Connection context layer
+
+The context layer is what turns a raw semantic model connection into an
+LLM-friendly workspace. Keep the filenames aligned to the connection name:
+
+```text
+Connections/
+  my_model.yaml
+  my_model_overview.md
+  my_model.md
+  my_model.data_dictionary.yaml
+```
+
+`get_connection_context` reads the overview first when it exists, falling back to
+the full markdown context. Use the overview for the shortest useful description:
+key tables, trusted measures, common filters, grain, date handling, and a few
+known-good DAX examples.
+
+Use the full `.md` file for deeper guidance: business definitions, metric
+caveats, relationship notes, security/filtering assumptions, common query
+patterns, and examples of what not to do.
+
+Use the data dictionary YAML when you want structured metadata that tools can
+search and return precisely:
+
+```yaml
+version: "1.0"
+tables:
+  - name: Sales
+    description: Fact table with booked transactions
+    columns:
+      - name: Amount
+        data_type: decimal
+        description: Transaction amount in USD
+        sample_values: ["100.00", "250.50"]
+measures:
+  - name: Total Sales
+    expression: SUM(Sales[Amount])
+    description: Sum of booked sales amount
+    format_string: "$#,##0.00"
+filters:
+  - name: Fiscal Year
+    column: Calendar[FiscalYear]
+    description: Filter by fiscal year
+    suggested_values: ["FY25", "FY26"]
 ```
 
 ## MCP tools
