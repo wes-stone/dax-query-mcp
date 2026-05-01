@@ -9,7 +9,16 @@ from loguru import logger
 
 from .connections import load_connections
 from .exceptions import ConfigurationError
-from .models import DAXQueryConfig
+from .models import (
+    AUTH_AZURE_CLI,
+    DEFAULT_POWERBI_API_BASE_URL,
+    DEFAULT_POWERBI_TOKEN_ENV,
+    SUPPORTED_AUTH_MODES,
+    SUPPORTED_TRANSPORTS,
+    TRANSPORT_MSOLAP,
+    TRANSPORT_POWERBI_REST,
+    DAXQueryConfig,
+)
 from .query_builder import QUERY_BUILDER_SUFFIX, load_query_builder_artifacts
 
 
@@ -111,6 +120,12 @@ def load_queries(config_dir: str | Path) -> dict[str, DAXQueryConfig]:
                 dax_query=dax_query,
                 description=definition.description,
                 output_filename=definition.output_filename,
+                transport=connection.transport,
+                dataset_id=connection.dataset_id,
+                auth_mode=connection.auth_mode,
+                access_token_env=connection.access_token_env,
+                api_base_url=connection.api_base_url,
+                impersonated_user_name=connection.impersonated_user_name,
                 connection_timeout_seconds=connection.connection_timeout_seconds,
                 command_timeout_seconds=(
                     definition.command_timeout_seconds
@@ -130,11 +145,33 @@ def _build_query_config(query_name: str, raw_config: Any, source: Path) -> DAXQu
     if not isinstance(raw_config, dict):
         raise ConfigurationError(f"Query '{query_name}' in {source.name} must be a mapping")
 
-    connection_string = _require_string(raw_config, "connection_string", query_name, source)
+    transport = _coerce_transport(raw_config.get("transport", TRANSPORT_MSOLAP), query_name, source)
+    if transport == TRANSPORT_POWERBI_REST:
+        connection_string = _optional_string(raw_config.get("connection_string"), "connection_string", query_name, source) or ""
+        dataset_id = _require_string(raw_config, "dataset_id", query_name, source)
+    else:
+        connection_string = _require_string(raw_config, "connection_string", query_name, source)
+        dataset_id = _optional_string(raw_config.get("dataset_id"), "dataset_id", query_name, source)
+
     dax_query = _require_string(raw_config, "dax_query", query_name, source)
 
     description = _optional_string(raw_config.get("description"), "description", query_name, source)
     output_filename = _optional_string(raw_config.get("output_filename"), "output_filename", query_name, source)
+    auth_mode = _coerce_auth_mode(raw_config.get("auth_mode", AUTH_AZURE_CLI), query_name, source)
+    access_token_env = (
+        _optional_string(raw_config.get("access_token_env"), "access_token_env", query_name, source)
+        or DEFAULT_POWERBI_TOKEN_ENV
+    )
+    api_base_url = (
+        _optional_string(raw_config.get("api_base_url"), "api_base_url", query_name, source)
+        or DEFAULT_POWERBI_API_BASE_URL
+    )
+    impersonated_user_name = _optional_string(
+        raw_config.get("impersonated_user_name"),
+        "impersonated_user_name",
+        query_name,
+        source,
+    )
     connection_timeout_seconds = _coerce_int(
         raw_config.get("connection_timeout_seconds", 300),
         "connection_timeout_seconds",
@@ -159,6 +196,12 @@ def _build_query_config(query_name: str, raw_config: Any, source: Path) -> DAXQu
         dax_query=dax_query,
         description=description,
         output_filename=output_filename,
+        transport=transport,
+        dataset_id=dataset_id,
+        auth_mode=auth_mode,
+        access_token_env=access_token_env,
+        api_base_url=api_base_url.rstrip("/"),
+        impersonated_user_name=impersonated_user_name,
         connection_timeout_seconds=connection_timeout_seconds,
         command_timeout_seconds=command_timeout_seconds,
         max_rows=max_rows,
@@ -172,6 +215,30 @@ def _require_string(raw_config: dict[str, Any], key: str, query_name: str, sourc
             f"Query '{query_name}' in {source.name} must define a non-empty '{key}' string"
         )
     return value.strip()
+
+
+def _coerce_transport(value: Any, query_name: str, source: Path) -> str:
+    transport = _optional_string(value, "transport", query_name, source) or TRANSPORT_MSOLAP
+    normalized = transport.lower()
+    if normalized not in SUPPORTED_TRANSPORTS:
+        supported = ", ".join(sorted(SUPPORTED_TRANSPORTS))
+        raise ConfigurationError(
+            f"Query '{query_name}' in {source.name} has unsupported transport "
+            f"'{transport}'. Supported transports: {supported}"
+        )
+    return normalized
+
+
+def _coerce_auth_mode(value: Any, query_name: str, source: Path) -> str:
+    auth_mode = _optional_string(value, "auth_mode", query_name, source) or AUTH_AZURE_CLI
+    normalized = auth_mode.lower()
+    if normalized not in SUPPORTED_AUTH_MODES:
+        supported = ", ".join(sorted(SUPPORTED_AUTH_MODES))
+        raise ConfigurationError(
+            f"Query '{query_name}' in {source.name} has unsupported auth_mode "
+            f"'{auth_mode}'. Supported auth modes: {supported}"
+        )
+    return normalized
 
 
 def _optional_string(value: Any, key: str, query_name: str, source: Path) -> str | None:
