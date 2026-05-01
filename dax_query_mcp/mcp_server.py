@@ -25,6 +25,7 @@ from .errors import (
 from .exceptions import DAXExecutionError
 from .executor import dax_to_pandas
 from .formatting import DEFAULT_DATE_FORMAT, dataframe_to_markdown, preview_records
+from .models import TRANSPORT_POWERBI_REST
 from .query_builder import (
     load_query_builder_artifacts,
     query_builder_from_dict,
@@ -33,7 +34,11 @@ from .query_builder import (
     save_query_builder_artifacts,
 )
 from .data_dictionary import DataDictionary, load_data_dictionary, save_data_dictionary, TableDef, MeasureDef
-from .scaffold import scaffold_workspace
+from .scaffold import (
+    build_scaffold_connection_config,
+    render_run_queries_script,
+    scaffold_workspace,
+)
 
 DEFAULT_CONNECTIONS_DIR = str(resolve_connections_dir(os.getenv("DAX_QUERY_MCP_CONNECTIONS_DIR")))
 DEFAULT_PREVIEW_ROWS = 10
@@ -217,18 +222,81 @@ def validate_dax_query(query: str) -> None:
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
-def list_connections(connections_dir: str = DEFAULT_CONNECTIONS_DIR) -> str:
-    """List configured connections. Call get_connection_context on any connection
-    with has_context_markdown=true before writing DAX queries.
+def list_connections(
+    connections_dir: str = DEFAULT_CONNECTIONS_DIR,
+    output_format: str = "markdown",
+) -> str:
+    """List configured connections as a markdown table by default.
+
+    Call get_connection_context on a connection with overview/full context before
+    writing DAX queries. Set output_format="json" for machine-readable output.
     """
+    payload = _list_connections_payload(connections_dir)
+    if output_format.lower() == "json":
+        return _to_json(payload)
+    if output_format.lower() != "markdown":
+        raise invalid_params(
+            message=f"Unsupported output_format '{output_format}'.",
+            suggestion='Use output_format="markdown" or output_format="json".',
+            parameter="output_format",
+        )
+    return _connections_to_markdown(payload)
+
+
+def _connections_to_markdown(payload: dict[str, Any]) -> str:
+    connections = payload["connections"]
+    connection_count = payload["connection_count"]
+    connections_dir = payload["connections_dir"]
+    if connection_count == 0:
+        return (
+            f"No DAX connections found in `{connections_dir}`.\n\n"
+            "Add a connection YAML file, then call `list_connections` again."
+        )
+
+    rows = [
+        "| Connection | Description | Type | Transport | Overview | Full context |",
+        "|---|---|---|---|---|---|",
+    ]
+    for connection in connections:
+        rows.append(
+            "| "
+            + " | ".join(
+                [
+                    f"`{_markdown_escape_cell(connection['name'])}`",
+                    _markdown_escape_cell(connection.get("description") or ""),
+                    _markdown_escape_cell(connection.get("connection_type") or ""),
+                    _markdown_escape_cell(connection.get("transport") or ""),
+                    "Yes" if connection.get("has_overview") else "No",
+                    "Yes" if connection.get("has_full_context") else "No",
+                ]
+            )
+            + " |"
+        )
+
+    heading = f"Found {connection_count} DAX connection"
+    if connection_count != 1:
+        heading += "s"
+    heading += f" in `{connections_dir}`."
+    return heading + "\n\n" + "\n".join(rows)
+
+
+def _markdown_escape_cell(value: object) -> str:
+    text = str(value)
+    return text.replace("|", "\\|").replace("\n", " ").strip()
+
+
+def _list_connections_payload(connections_dir: str = DEFAULT_CONNECTIONS_DIR) -> dict[str, Any]:
     connections = load_connections(connections_dir)
-    payload = {
+    return {
         "connections_dir": str(resolve_connections_dir(connections_dir)),
         "connection_count": len(connections),
         "connections": [
             {
                 "name": connection.name,
                 "description": connection.description,
+                "transport": connection.transport,
+                "connection_type": _connection_type(connection),
+                "has_dataset_id": connection.dataset_id is not None,
                 "suggested_skill": connection.suggested_skill,
                 "suggested_skill_reason": connection.suggested_skill_reason,
                 "has_overview": connection.overview_markdown is not None,
@@ -237,7 +305,6 @@ def list_connections(connections_dir: str = DEFAULT_CONNECTIONS_DIR) -> str:
             for connection in connections.values()
         ],
     }
-    return _to_json(payload)
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
@@ -267,6 +334,9 @@ def get_connection_context(
     payload = {
         "connection_name": connection.name,
         "description": connection.description,
+        "transport": connection.transport,
+        "connection_type": _connection_type(connection),
+        "has_dataset_id": connection.dataset_id is not None,
         "suggested_skill": connection.suggested_skill,
         "suggested_skill_reason": connection.suggested_skill_reason,
         "detail_level": detail,
@@ -424,10 +494,17 @@ def get_schema(
             for f in dd.filters
         ]
     else:
-        payload["message"] = (
-            "No data dictionary found. Use inspect_connection for live schema "
-            "discovery, or create a data dictionary file."
-        )
+        if connection.transport == TRANSPORT_POWERBI_REST:
+            payload["message"] = (
+                "No data dictionary found. Power BI REST connections cannot use "
+                "MDSCHEMA/DMV live schema discovery through executeQueries, so create "
+                "a data dictionary file or add markdown context for this connection."
+            )
+        else:
+            payload["message"] = (
+                "No data dictionary found. Use inspect_connection for live schema "
+                "discovery, or create a data dictionary file."
+            )
 
     return _to_json(payload)
 
@@ -451,12 +528,10 @@ def run_connection_query(
     validate_dax_query(query)
     connection = _get_connection(connection_name, connections_dir)
     try:
-        dataframe = dax_to_pandas(
-            dax_query=query,
-            conn_str=connection.connection_string,
-            connection_timeout_seconds=connection.connection_timeout_seconds,
-            command_timeout_seconds=connection.command_timeout_seconds,
-            max_rows=max_rows or connection.max_rows,
+        dataframe = _execute_connection_dataframe(
+            connection,
+            query,
+            max_rows=max_rows,
             profile=profile,
         )
     except DAXExecutionError as exc:
@@ -566,6 +641,20 @@ def inspect_connection_metadata(
 ) -> dict[str, Any]:
     """Return connection metadata as a Python payload for CLI and MCP callers."""
     connection = _get_connection(connection_name, connections_dir)
+    if connection.transport == TRANSPORT_POWERBI_REST:
+        return {
+            "connection_name": connection_name,
+            "transport": connection.transport,
+            "live_metadata_supported": False,
+            "has_context_markdown": connection.context_markdown is not None,
+            "has_overview": connection.overview_markdown is not None,
+            "presentation_hint": _MARKDOWN_PRESENTATION_HINT,
+            "message": (
+                "Power BI REST executeQueries supports DAX query execution but not "
+                "MDSCHEMA/DMV live metadata inspection. Use the connection context "
+                "or data dictionary files, or use an MSOLAP connection for live inspection."
+            ),
+        }
     effective_timeout = (
         connection.command_timeout_seconds if command_timeout_seconds is None else command_timeout_seconds
     )
@@ -583,10 +672,10 @@ def inspect_connection_metadata(
 
     for name, rowset_query in rowsets.items():
         try:
-            dataframe = dax_to_pandas(
-                dax_query=rowset_query,
-                conn_str=connection.connection_string,
-                connection_timeout_seconds=connection.connection_timeout_seconds,
+            dataframe = _execute_connection_dataframe(
+                connection,
+                rowset_query,
+                max_rows=None,
                 command_timeout_seconds=effective_timeout,
             )
             results[name] = summarize_rowset(
@@ -781,40 +870,39 @@ def search_columns(
 
     # 2. Supplement with live MDSCHEMA schema (columns not already found)
     try:
-        dataframe = dax_to_pandas(
-            dax_query=(
-                "SELECT DIMENSION_UNIQUE_NAME, HIERARCHY_UNIQUE_NAME, "
-                "LEVEL_NAME, DESCRIPTION "
-                "FROM $SYSTEM.MDSCHEMA_LEVELS"
-            ),
-            conn_str=connection.connection_string,
-            connection_timeout_seconds=connection.connection_timeout_seconds,
-            command_timeout_seconds=connection.command_timeout_seconds,
-        )
-        for _, row in dataframe.iterrows():
-            dim_name = str(row.get("DIMENSION_UNIQUE_NAME", ""))
-            col_name = str(row.get("LEVEL_NAME", ""))
-            schema_desc = str(row.get("DESCRIPTION", "") or "")
-            table_name = dim_name.strip("[]")
+        if connection.transport != TRANSPORT_POWERBI_REST:
+            dataframe = _execute_connection_dataframe(
+                connection,
+                (
+                    "SELECT DIMENSION_UNIQUE_NAME, HIERARCHY_UNIQUE_NAME, "
+                    "LEVEL_NAME, DESCRIPTION "
+                    "FROM $SYSTEM.MDSCHEMA_LEVELS"
+                ),
+            )
+            for _, row in dataframe.iterrows():
+                dim_name = str(row.get("DIMENSION_UNIQUE_NAME", ""))
+                col_name = str(row.get("LEVEL_NAME", ""))
+                schema_desc = str(row.get("DESCRIPTION", "") or "")
+                table_name = dim_name.strip("[]")
 
-            if (table_name, col_name) in seen:
-                continue
+                if (table_name, col_name) in seen:
+                    continue
 
-            col_lower = col_name.lower()
-            desc_lower = schema_desc.lower()
-            dd_desc = desc_lookup.get((table_name, col_name), "")
-            dd_desc_lower = dd_desc.lower()
+                col_lower = col_name.lower()
+                desc_lower = schema_desc.lower()
+                dd_desc = desc_lookup.get((table_name, col_name), "")
+                dd_desc_lower = dd_desc.lower()
 
-            if term_lower in col_lower or term_lower in desc_lower or term_lower in dd_desc_lower:
-                data_type = dd_type_lookup.get((table_name, col_name), "")
-                description = dd_desc or schema_desc
-                matches.append({
-                    "table": table_name,
-                    "column": col_name,
-                    "data_type": data_type,
-                    "description": description,
-                })
-                seen.add((table_name, col_name))
+                if term_lower in col_lower or term_lower in desc_lower or term_lower in dd_desc_lower:
+                    data_type = dd_type_lookup.get((table_name, col_name), "")
+                    description = dd_desc or schema_desc
+                    matches.append({
+                        "table": table_name,
+                        "column": col_name,
+                        "data_type": data_type,
+                        "description": description,
+                    })
+                    seen.add((table_name, col_name))
     except Exception:
         pass
 
@@ -971,12 +1059,10 @@ def copy_to_clipboard(
     validate_dax_query(query)
     connection = _get_connection(connection_name, connections_dir)
     try:
-        dataframe = dax_to_pandas(
-            dax_query=query,
-            conn_str=connection.connection_string,
-            connection_timeout_seconds=connection.connection_timeout_seconds,
-            command_timeout_seconds=connection.command_timeout_seconds,
-            max_rows=max_rows or connection.max_rows,
+        dataframe = _execute_connection_dataframe(
+            connection,
+            query,
+            max_rows=max_rows,
         )
     except DAXExecutionError as exc:
         if "timeout" in str(exc).lower() or "timed out" in str(exc).lower():
@@ -1021,20 +1107,31 @@ def scaffold_dax_workspace(
     After scaffolding, explain to the user:
     1. What files were created and what each one does
     2. How to run it: `cd <output_dir> && uv run run_query.py`
-    3. That they can copy dax_to_pandas() from run_query.py into any notebook
-    4. To edit CONNECTION_STRING in run_query.py if it shows a placeholder
+    3. That they can copy execute_dax() / dax_to_pandas() from run_query.py into any notebook
+    4. To edit CONNECTION in run_query.py if it shows placeholder connection values
     """
-    conn_str = ""
+    connection_kwargs: dict[str, Any] = {}
     if connection_name:
         conn = _get_connection(connection_name, connections_dir)
-        conn_str = conn.connection_string
+        connection_kwargs = {
+            "connection_string": conn.connection_string,
+            "transport": conn.transport,
+            "dataset_id": conn.dataset_id,
+            "auth_mode": conn.auth_mode,
+            "access_token_env": conn.access_token_env,
+            "api_base_url": conn.api_base_url,
+            "impersonated_user_name": conn.impersonated_user_name,
+            "connection_timeout_seconds": conn.connection_timeout_seconds,
+            "command_timeout_seconds": conn.command_timeout_seconds,
+            "max_rows": conn.max_rows,
+        }
 
     result = scaffold_workspace(
         output_dir,
         query_text=query_text,
         query_name=query_name,
         project_name=project_name or None,
-        connection_string=conn_str,
+        **connection_kwargs,
         overwrite=True,
     )
     return _to_json(result)
@@ -1130,12 +1227,10 @@ def export_to_csv(
     validate_dax_query(query)
     connection = _get_connection(connection_name, connections_dir)
     try:
-        dataframe = dax_to_pandas(
-            dax_query=query,
-            conn_str=connection.connection_string,
-            connection_timeout_seconds=connection.connection_timeout_seconds,
-            command_timeout_seconds=connection.command_timeout_seconds,
-            max_rows=max_rows or connection.max_rows,
+        dataframe = _execute_connection_dataframe(
+            connection,
+            query,
+            max_rows=max_rows,
         )
     except DAXExecutionError as exc:
         if "timeout" in str(exc).lower() or "timed out" in str(exc).lower():
@@ -1172,6 +1267,16 @@ def scaffold_power_query(
     """
     validate_dax_query(query)
     connection = _get_connection(connection_name, connections_dir)
+    if connection.transport == TRANSPORT_POWERBI_REST:
+        raise invalid_params(
+            message="scaffold_power_query currently supports MSOLAP connections only.",
+            suggestion=(
+                "Use an MSOLAP connection for Excel Power Query scaffolding, or run the REST-backed query "
+                "with export_to_csv/copy_to_clipboard and load that output into Excel."
+            ),
+            connection_name=connection_name,
+            transport=connection.transport,
+        )
     conn_str = connection.connection_string.strip()
 
     escaped_query = query.replace('"', '""')
@@ -1230,12 +1335,10 @@ def quick_chart(
     validate_dax_query(query)
     connection = _get_connection(connection_name, connections_dir)
     try:
-        dataframe = dax_to_pandas(
-            dax_query=query,
-            conn_str=connection.connection_string,
-            connection_timeout_seconds=connection.connection_timeout_seconds,
-            command_timeout_seconds=connection.command_timeout_seconds,
-            max_rows=max_rows or connection.max_rows,
+        dataframe = _execute_connection_dataframe(
+            connection,
+            query,
+            max_rows=max_rows,
         )
     except DAXExecutionError as exc:
         if "timeout" in str(exc).lower() or "timed out" in str(exc).lower():
@@ -1296,7 +1399,23 @@ def generate_data_dictionary(
     file_path (when output_path is given).
     """
     connection = _get_connection(connection_name, connections_dir)
-    conn_str = connection.connection_string
+    if connection.transport == TRANSPORT_POWERBI_REST:
+        dd = find_data_dictionary(connection_name, connections_dir)
+        payload: dict[str, Any] = {
+            "connection_name": connection_name,
+            "transport": connection.transport,
+            "generated": False,
+            "table_count": len(dd.tables) if dd is not None else 0,
+            "measure_count": len(dd.measures) if dd is not None else 0,
+            "message": (
+                "Power BI REST executeQueries does not expose MDSCHEMA/DMV live metadata. "
+                "Use an existing data dictionary file, fill one manually from model docs, "
+                "or run generate_data_dictionary against an MSOLAP connection to the same model."
+            ),
+        }
+        if dd is not None:
+            payload["data_dictionary"] = dd.model_dump()
+        return _to_json(payload)
 
     schema_queries = {
         "measuregroups": "SELECT * FROM $SYSTEM.MDSCHEMA_MEASUREGROUPS",
@@ -1307,12 +1426,7 @@ def generate_data_dictionary(
     raw: dict[str, pd.DataFrame] = {}
     for key, query in schema_queries.items():
         try:
-            raw[key] = dax_to_pandas(
-                dax_query=query,
-                conn_str=conn_str,
-                connection_timeout_seconds=connection.connection_timeout_seconds,
-                command_timeout_seconds=connection.command_timeout_seconds,
-            )
+            raw[key] = _execute_connection_dataframe(connection, query)
         except DAXExecutionError as exc:
             raise execution_failed(query, exc) from exc
 
@@ -1489,106 +1603,6 @@ def clear_workstation(
     })
 
 
-_MULTI_RUN_TEMPLATE = textwrap.dedent("""\
-    \"\"\"Run all workstation queries and print results.
-
-    Requirements (Windows only):
-        pip install pywin32 pandas rich   # or use the generated pyproject.toml with uv
-    \"\"\"
-
-    from __future__ import annotations
-
-    import re
-    import sys
-    from contextlib import suppress
-    from datetime import datetime
-    from pathlib import Path
-
-    import pandas as pd
-
-    _ANSI_RE = re.compile(r'\\x1b\\[[0-9;]*m')
-
-    # ── Connections ───────────────────────────────────────────────────────
-    # Map connection names to connection strings.  Edit with your real values.
-    CONNECTIONS = {connections_dict}
-
-
-    def dax_to_pandas(
-        dax_query: str,
-        conn_str: str,
-        *,
-        timeout: int = 1800,
-        max_rows: int | None = None,
-    ) -> pd.DataFrame:
-        \"\"\"Execute a DAX query via COM/ADODB and return a pandas DataFrame.\"\"\"
-        import win32com.client  # Windows-only
-
-        conn = win32com.client.Dispatch("ADODB.Connection")
-        conn.ConnectionTimeout = 300
-        conn.CommandTimeout = timeout
-        conn.Open(conn_str)
-
-        cmd = win32com.client.Dispatch("ADODB.Command")
-        cmd.ActiveConnection = conn
-        cmd.CommandText = dax_query
-        cmd.CommandTimeout = timeout
-
-        try:
-            recordset = cmd.Execute()[0]
-            fields = [recordset.Fields(i).Name for i in range(recordset.Fields.Count)]
-            rows = recordset.GetRows(max_rows) if max_rows else recordset.GetRows()
-        finally:
-            with suppress(Exception):
-                cmd.ActiveConnection = None
-            for obj in (recordset, conn):
-                close = getattr(obj, "Close", None)
-                if callable(close):
-                    with suppress(Exception):
-                        close()
-
-        data = {{}}
-        for i, name in enumerate(fields):
-            name = _ANSI_RE.sub('', name)
-            vals = [_strip_tz(v) for v in rows[i]] if rows and i < len(rows) else []
-            data[name] = list(vals)
-
-        return pd.DataFrame(data)
-
-
-    def _strip_tz(value: object) -> object:
-        if isinstance(value, datetime) and getattr(value, "tzinfo", None) is not None:
-            return value.replace(tzinfo=None)
-        return value
-
-
-    QUERIES = {queries_list}
-
-
-    if __name__ == "__main__":
-        from rich.console import Console
-        from rich.table import Table
-
-        console = Console()
-
-        for entry in QUERIES:
-            qfile = Path(entry["file"])
-            conn_str = CONNECTIONS.get(entry["connection"], "")
-            if not qfile.exists():
-                console.print(f"[red]Missing: {{qfile}}[/red]")
-                continue
-            dax = qfile.read_text(encoding="utf-8")
-            console.print(f"\\n[bold]Running {{entry['name']}} ...[/bold]")
-            console.print(f"  [dim]{{entry['description']}}[/dim]")
-            df = dax_to_pandas(dax, conn_str)
-            console.print(f"  [green]{{len(df)}} rows x {{len(df.columns)}} cols[/green]")
-            table = Table(show_lines=True, title=entry["name"])
-            for col in df.columns:
-                table.add_column(str(col), header_style="bold cyan")
-            for _, row in df.head(20).iterrows():
-                table.add_row(*[str(v) for v in row])
-            console.print(table)
-""")
-
 _MULTI_PYPROJECT_TEMPLATE = textwrap.dedent("""\
     [project]
     name = "{project_name}"
@@ -1649,23 +1663,44 @@ def export_workstation(
 
     # ── scaffold format ──────────────────────────────────────────────
     connection_names = sorted({e["connection_name"] for e in entries})
-    connections_dict_repr = "{\n" + "".join(
-        f'    "{cn}": "YOUR_CONNECTION_STRING_HERE",\n' for cn in connection_names
-    ) + "}"
+    available_connections = load_connections(connections_dir)
+    connections_config: dict[str, dict[str, Any]] = {}
+    for connection_name in connection_names:
+        connection = available_connections.get(connection_name)
+        if connection is None:
+            connections_config[connection_name] = build_scaffold_connection_config()
+            continue
 
-    queries_list_repr = "[\n" + "".join(
-        f'    {{"name": "{e["query_name"]}", "file": "queries/{e["query_name"]}.dax", '
-        f'"connection": "{e["connection_name"]}", "description": "{e["description"]}"}},\n'
+        connections_config[connection_name] = build_scaffold_connection_config(
+            connection_string=connection.connection_string,
+            transport=connection.transport,
+            dataset_id=connection.dataset_id,
+            auth_mode=connection.auth_mode,
+            access_token_env=connection.access_token_env,
+            api_base_url=connection.api_base_url,
+            impersonated_user_name=connection.impersonated_user_name,
+            connection_timeout_seconds=connection.connection_timeout_seconds,
+            command_timeout_seconds=connection.command_timeout_seconds,
+            max_rows=connection.max_rows,
+        )
+
+    queries_payload = [
+        {
+            "name": e["query_name"],
+            "file": f"queries/{e['query_name']}.dax",
+            "connection": e["connection_name"],
+            "description": e["description"],
+        }
         for e in entries
-    ) + "]"
+    ]
 
     safe_project = out.name.replace(" ", "-").lower()
 
     run_script = out / "run_queries.py"
     run_script.write_text(
-        _MULTI_RUN_TEMPLATE.format(
-            connections_dict=connections_dict_repr,
-            queries_list=queries_list_repr,
+        render_run_queries_script(
+            connections_config=connections_config,
+            queries=queries_payload,
         ),
         encoding="utf-8",
     )
@@ -1706,6 +1741,40 @@ def export_workstation(
 
 def _to_json(payload: Any) -> str:
     return json.dumps(payload, indent=2, default=str)
+
+
+def _connection_type(connection: Any) -> str:
+    if str(getattr(connection, "connection_string", "")).strip().upper().startswith("MOCK://"):
+        return "mock"
+    return str(connection.transport)
+
+
+def _execute_connection_dataframe(
+    connection: Any,
+    query: str,
+    *,
+    max_rows: int | None = None,
+    command_timeout_seconds: int | None = None,
+    profile: bool = False,
+) -> pd.DataFrame:
+    return dax_to_pandas(
+        dax_query=query,
+        conn_str=connection.connection_string,
+        transport=connection.transport,
+        dataset_id=connection.dataset_id,
+        auth_mode=connection.auth_mode,
+        access_token_env=connection.access_token_env,
+        api_base_url=connection.api_base_url,
+        impersonated_user_name=connection.impersonated_user_name,
+        connection_timeout_seconds=connection.connection_timeout_seconds,
+        command_timeout_seconds=(
+            connection.command_timeout_seconds
+            if command_timeout_seconds is None
+            else command_timeout_seconds
+        ),
+        max_rows=max_rows if max_rows is not None else connection.max_rows,
+        profile=profile,
+    )
 
 
 def _get_connection(connection_name: str, connections_dir: str) -> Any:

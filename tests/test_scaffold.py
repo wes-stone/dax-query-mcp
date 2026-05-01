@@ -168,3 +168,79 @@ def test_scaffold_connection_string_with_quotes(tmp_path: Path) -> None:
     )
     script = (output / "run_query.py").read_text(encoding="utf-8")
     compile(script, "run_query.py", "exec")
+
+
+def test_scaffold_powerbi_rest_connection_config(tmp_path: Path) -> None:
+    """Generated single-query scaffold preserves REST transport metadata."""
+    output = tmp_path / "rest"
+    scaffold_workspace(
+        output,
+        query_text='EVALUATE ROW("Ping", 1)',
+        transport="powerbi_rest",
+        dataset_id="00000000-0000-0000-0000-000000000000",
+        auth_mode="env",
+        access_token_env="TEST_POWERBI_TOKEN",
+    )
+
+    script = (output / "run_query.py").read_text(encoding="utf-8")
+    compile(script, "run_query.py", "exec")
+    assert '"transport": "powerbi_rest"' in script
+    assert '"dataset_id": "00000000-0000-0000-0000-000000000000"' in script
+    assert '"auth_mode": "env"' in script
+    assert '"access_token_env": "TEST_POWERBI_TOKEN"' in script
+    assert "powerbi_rest_to_pandas" in script
+    assert "az.cmd" in script
+
+    nb = json.loads((output / "notebook.ipynb").read_text(encoding="utf-8"))
+    all_source = " ".join("".join(c["source"]) for c in nb["cells"] if c["cell_type"] == "code")
+    assert "powerbi_rest_to_pandas" in all_source
+    assert "TEST_POWERBI_TOKEN" in all_source
+
+
+def test_scaffold_powerbi_rest_rejects_workspace_scoped_base_url(tmp_path: Path) -> None:
+    """Generated scaffold refuses /groups/{workspace} REST base URLs."""
+    output = tmp_path / "rest_groups"
+    scaffold_workspace(
+        output,
+        query_text='EVALUATE ROW("Ping", 1)',
+        transport="powerbi_rest",
+        dataset_id="00000000-0000-0000-0000-000000000000",
+        auth_mode="env",
+        access_token_env="TEST_POWERBI_TOKEN",
+        api_base_url="https://api.powerbi.com/v1.0/myorg/groups/00000000-0000-0000-0000-000000000000",
+    )
+
+    namespace = {"__name__": "generated_run_query", "__file__": str(output / "run_query.py")}
+    script = (output / "run_query.py").read_text(encoding="utf-8")
+    exec(script, namespace)
+
+    with pytest.raises(RuntimeError, match="dataset-only executeQueries endpoint"):
+        namespace["powerbi_rest_to_pandas"]('EVALUATE ROW("Ping", 1)', namespace["CONNECTION"])
+
+
+def test_scaffold_mock_connection_executes_without_com(tmp_path: Path) -> None:
+    """MOCK:// scaffolds can run the demo query without pywin32/ADODB."""
+    output = tmp_path / "mock"
+    scaffold_workspace(
+        output,
+        query_text=(
+            "EVALUATE\n"
+            "SUMMARIZE(\n"
+            "    Sales,\n"
+            '    "Total Sales", [Total Sales],\n'
+            '    "Total Quantity", [Total Quantity]\n'
+            ")"
+        ),
+        connection_string="MOCK://contoso",
+    )
+
+    namespace = {"__name__": "generated_run_query", "__file__": str(output / "run_query.py")}
+    script = (output / "run_query.py").read_text(encoding="utf-8")
+    exec(script, namespace)
+
+    dataframe = namespace["execute_dax"](
+        (output / "queries" / "query.dax").read_text(encoding="utf-8"),
+        namespace["CONNECTION"],
+    )
+    assert dataframe.iloc[0]["Total_Sales"] == 178390.0
+    assert dataframe.iloc[0]["Total_Quantity"] == 290

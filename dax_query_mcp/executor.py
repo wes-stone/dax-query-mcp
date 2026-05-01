@@ -1,6 +1,12 @@
 from __future__ import annotations
 
+import json
+import os
+import shutil
+import subprocess
 import sys
+import urllib.error
+import urllib.request
 from contextlib import suppress
 from datetime import datetime
 from typing import Callable, Iterator
@@ -9,10 +15,23 @@ import pandas as pd
 from loguru import logger
 
 from .exceptions import DAXExecutionError
-from .models import DAXQueryConfig
+from .models import (
+    AUTH_AZURE_CLI,
+    AUTH_ENV,
+    DEFAULT_POWERBI_API_BASE_URL,
+    DEFAULT_POWERBI_TOKEN_ENV,
+    TRANSPORT_MSOLAP,
+    TRANSPORT_POWERBI_REST,
+    DAXQueryConfig,
+)
 from .profiling import QueryProfiler
 
 DispatchFn = Callable[[str], object]
+POWERBI_API_RESOURCE = "https://analysis.windows.net/powerbi/api"
+WINDOWS_AZURE_CLI_PATHS = (
+    r"C:\Program Files\Microsoft SDKs\Azure\CLI2\wbin\az.cmd",
+    r"C:\Program Files (x86)\Microsoft SDKs\Azure\CLI2\wbin\az.cmd",
+)
 MSOLAP_INSTALL_URL = (
     "https://learn.microsoft.com/en-us/analysis-services/client-libraries?view=sql-analysis-services-2025"
 )
@@ -33,6 +52,12 @@ def dax_to_pandas(
     dax_query: str,
     conn_str: str,
     *,
+    transport: str = TRANSPORT_MSOLAP,
+    dataset_id: str | None = None,
+    auth_mode: str = AUTH_AZURE_CLI,
+    access_token_env: str | None = None,
+    api_base_url: str = DEFAULT_POWERBI_API_BASE_URL,
+    impersonated_user_name: str | None = None,
     connection_timeout_seconds: int = 300,
     command_timeout_seconds: int = 1800,
     max_rows: int | None = None,
@@ -47,10 +72,18 @@ def dax_to_pandas(
         name="adhoc_query",
         connection_string=conn_str,
         dax_query=dax_query,
+        transport=transport,
+        dataset_id=dataset_id,
+        auth_mode=auth_mode,
+        access_token_env=access_token_env,
+        api_base_url=api_base_url,
+        impersonated_user_name=impersonated_user_name,
         connection_timeout_seconds=connection_timeout_seconds,
         command_timeout_seconds=command_timeout_seconds,
         max_rows=max_rows,
     )
+    if transport == TRANSPORT_POWERBI_REST:
+        return PowerBIRestExecutor().execute(config, profile=profile)
     return DAXExecutor(connection_string=conn_str).execute(config, profile=profile)
 
 
@@ -81,29 +114,33 @@ class DAXExecutor:
         elif connection_string is not None:
             self._dispatcher = get_dispatcher_for_connection(connection_string)
         else:
-            self._dispatcher = _default_dispatcher()
+            self._dispatcher = None
 
     def execute(self, query: DAXQueryConfig, *, profile: bool = False) -> pd.DataFrame:
+        if query.transport == TRANSPORT_POWERBI_REST:
+            return PowerBIRestExecutor().execute(query, profile=profile)
+
         profiler = QueryProfiler(query_name=query.name, enabled=profile)
         conn = None
         cmd = None
         recordset = None
 
         try:
+            dispatcher = self._dispatcher or get_dispatcher_for_connection(query.connection_string)
             profiler.start_phase("connect")
             logger.debug(
                 "Opening ADODB connection for query '{}' using {}",
                 query.name,
                 redact_connection_string(query.connection_string),
             )
-            conn = self._dispatcher("ADODB.Connection")
+            conn = dispatcher("ADODB.Connection")
             conn.ConnectionTimeout = query.connection_timeout_seconds
             conn.CommandTimeout = query.command_timeout_seconds
             conn.Open(query.connection_string)
             profiler.stop_phase("connect")
 
             profiler.start_phase("execute")
-            cmd = self._dispatcher("ADODB.Command")
+            cmd = dispatcher("ADODB.Command")
             cmd.ActiveConnection = conn
             cmd.CommandText = query.dax_query
             cmd.CommandTimeout = query.command_timeout_seconds
@@ -134,6 +171,237 @@ class DAXExecutor:
             _release_command(cmd)
             _safe_close(recordset)
             _safe_close(conn)
+
+
+class PowerBIRestExecutor:
+    """Power BI REST executeQueries-backed DAX executor."""
+
+    def __init__(
+        self,
+        *,
+        token_getter: Callable[[DAXQueryConfig], str] | None = None,
+        opener: Callable[..., object] | None = None,
+    ):
+        self._token_getter = token_getter or _get_powerbi_access_token
+        self._opener = opener or urllib.request.urlopen
+
+    def execute(self, query: DAXQueryConfig, *, profile: bool = False) -> pd.DataFrame:
+        profiler = QueryProfiler(query_name=query.name, enabled=profile)
+        try:
+            _powerbi_rest_dataset_only_base_url(query.api_base_url or DEFAULT_POWERBI_API_BASE_URL)
+
+            profiler.start_phase("connect")
+            token = self._token_getter(query)
+            profiler.stop_phase("connect")
+
+            profiler.start_phase("execute")
+            payload = _execute_powerbi_rest_request(query, token, self._opener)
+            profiler.stop_phase("execute")
+
+            profiler.start_phase("fetch")
+            dataframe = _powerbi_rest_payload_to_dataframe(payload, max_rows=query.max_rows)
+            profiler.stop_phase("fetch")
+
+            profiler.start_phase("normalize")
+            dataframe = _normalize_dataframe(dataframe)
+            profiler.stop_phase("normalize")
+
+            logger.debug("REST query '{}' returned shape {}", query.name, dataframe.shape)
+
+            if profile:
+                profiler.finalize()
+                dataframe.attrs["profiling"] = profiler.to_response_field()
+
+            return dataframe
+        except DAXExecutionError:
+            raise
+        except Exception as exc:
+            raise DAXExecutionError(_format_execution_error(query.name, exc)) from exc
+
+
+def _get_powerbi_access_token(query: DAXQueryConfig) -> str:
+    if query.auth_mode == AUTH_ENV:
+        env_name = query.access_token_env or DEFAULT_POWERBI_TOKEN_ENV
+        token = os.getenv(env_name)
+        if not token:
+            raise DAXExecutionError(
+                f"Power BI REST auth_mode='env' requires environment variable '{env_name}' to contain an access token."
+            )
+        return token
+
+    if query.auth_mode != AUTH_AZURE_CLI:
+        raise DAXExecutionError(f"Unsupported Power BI REST auth_mode '{query.auth_mode}'.")
+
+    az_executable = _resolve_azure_cli_executable()
+    completed = subprocess.run(
+        [
+            az_executable,
+            "account",
+            "get-access-token",
+            "--resource",
+            POWERBI_API_RESOURCE,
+            "--query",
+            "accessToken",
+            "-o",
+            "tsv",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=query.connection_timeout_seconds,
+        check=False,
+    )
+    token = completed.stdout.strip()
+    if completed.returncode != 0 or not token:
+        detail = completed.stderr.strip() or completed.stdout.strip() or "Azure CLI returned no token."
+        raise DAXExecutionError(
+            "Failed to get a Power BI REST access token from Azure CLI. "
+            "Run `az login --allow-no-subscriptions` or set auth_mode='env'. "
+            f"Azure CLI detail: {detail}"
+        )
+    return token
+
+
+def _resolve_azure_cli_executable() -> str:
+    configured_path = os.getenv("AZURE_CLI_PATH")
+    if configured_path:
+        return configured_path
+
+    if sys.platform == "win32":
+        for executable_name in ("az.cmd", "az.exe"):
+            path_executable = shutil.which(executable_name)
+            if path_executable:
+                return path_executable
+
+        for candidate in WINDOWS_AZURE_CLI_PATHS:
+            if os.path.isfile(candidate):
+                return candidate
+
+    else:
+        path_executable = shutil.which("az")
+        if path_executable:
+            return path_executable
+
+    path_executable = shutil.which("az")
+    if path_executable and sys.platform != "win32":
+        return path_executable
+
+    raise DAXExecutionError(
+        "Azure CLI executable not found. Install Azure CLI, add `az` to PATH, "
+        "or set AZURE_CLI_PATH to the full az executable path."
+    )
+
+
+def _execute_powerbi_rest_request(
+    query: DAXQueryConfig,
+    token: str,
+    opener: Callable[..., object],
+) -> dict[str, object]:
+    if not query.dataset_id:
+        raise DAXExecutionError("Power BI REST transport requires dataset_id in the connection configuration.")
+
+    api_base_url = _powerbi_rest_dataset_only_base_url(query.api_base_url or DEFAULT_POWERBI_API_BASE_URL)
+    url = f"{api_base_url}/datasets/{query.dataset_id}/executeQueries"
+    body: dict[str, object] = {
+        "queries": [{"query": query.dax_query}],
+        "serializerSettings": {"includeNulls": True},
+    }
+    if query.impersonated_user_name:
+        body["impersonatedUserName"] = query.impersonated_user_name
+
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(body).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with opener(request, timeout=query.command_timeout_seconds) as response:
+            response_body = response.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        error_body = exc.read().decode("utf-8", errors="replace")
+        raise DAXExecutionError(_format_rest_http_error(exc.code, error_body)) from exc
+    except urllib.error.URLError as exc:
+        raise DAXExecutionError(f"Power BI REST request failed: {exc.reason}") from exc
+
+    try:
+        payload = json.loads(response_body or "{}")
+    except json.JSONDecodeError as exc:
+        raise DAXExecutionError("Power BI REST returned a non-JSON response.") from exc
+    if not isinstance(payload, dict):
+        raise DAXExecutionError("Power BI REST returned an unexpected response shape.")
+    return payload
+
+
+def _powerbi_rest_dataset_only_base_url(api_base_url: str) -> str:
+    api_base_url = api_base_url.rstrip("/")
+    if "/groups/" in api_base_url.lower():
+        raise DAXExecutionError(
+            "Power BI REST transport uses the dataset-only executeQueries endpoint. "
+            "Set api_base_url to 'https://api.powerbi.com/v1.0/myorg' and configure dataset_id separately; "
+            "do not include '/groups/{workspace_id}' in api_base_url."
+        )
+    return api_base_url
+
+
+def _powerbi_rest_payload_to_dataframe(payload: dict[str, object], *, max_rows: int | None) -> pd.DataFrame:
+    _raise_rest_payload_error(payload.get("error"))
+
+    results = payload.get("results")
+    if not isinstance(results, list) or not results:
+        return pd.DataFrame()
+
+    result = results[0]
+    if not isinstance(result, dict):
+        raise DAXExecutionError("Power BI REST returned an unexpected query result shape.")
+    _raise_rest_payload_error(result.get("error"))
+
+    tables = result.get("tables")
+    if not isinstance(tables, list) or not tables:
+        return pd.DataFrame()
+    if len(tables) > 1:
+        raise DAXExecutionError("Power BI REST returned more than one result table.")
+
+    table = tables[0]
+    if not isinstance(table, dict):
+        raise DAXExecutionError("Power BI REST returned an unexpected table result shape.")
+    _raise_rest_payload_error(table.get("error"))
+
+    rows = table.get("rows", [])
+    if not isinstance(rows, list):
+        raise DAXExecutionError("Power BI REST returned an unexpected rows shape.")
+
+    dataframe = pd.DataFrame(rows)
+    if max_rows is not None:
+        dataframe = dataframe.head(max_rows)
+    return dataframe
+
+
+def _raise_rest_payload_error(error: object) -> None:
+    if not error:
+        return
+    if isinstance(error, dict):
+        code = error.get("code", "PowerBIRestError")
+        message = error.get("message", "Power BI REST query failed.")
+        raise DAXExecutionError(f"{code}: {message}")
+    raise DAXExecutionError(f"Power BI REST query failed: {error}")
+
+
+def _format_rest_http_error(status_code: int, body: str) -> str:
+    if not body:
+        return f"Power BI REST request failed with HTTP {status_code}."
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError:
+        return f"Power BI REST request failed with HTTP {status_code}: {body}"
+    error = payload.get("error") if isinstance(payload, dict) else None
+    if isinstance(error, dict):
+        code = error.get("code", f"HTTP {status_code}")
+        message = error.get("message", body)
+        return f"Power BI REST request failed with HTTP {status_code} ({code}): {message}"
+    return f"Power BI REST request failed with HTTP {status_code}: {body}"
 
 
 def _ensure_com_initialized() -> None:

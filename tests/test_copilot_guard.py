@@ -1,6 +1,16 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 from dax_query_mcp.copilot_guard import deterministic_scan, iter_added_lines, load_guard_config
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _load_tracked_guard_config() -> dict:
+    return json.loads((REPO_ROOT / ".github" / "copilot-guard.json").read_text(encoding="utf-8"))
 
 
 def test_iter_added_lines_tracks_file_context() -> None:
@@ -44,6 +54,57 @@ def test_deterministic_scan_blocks_private_connection_files_and_patterns() -> No
     assert len(findings) == 2
     assert findings[0].file_path == "Connections/private.yaml"
     assert findings[1].file_path == "README.md"
+
+
+def test_tracked_guard_blocks_real_powerbi_rest_identifiers() -> None:
+    config = _load_tracked_guard_config()
+
+    findings = deterministic_scan(
+        ["README.md"],
+        """diff --git a/README.md b/README.md
++++ b/README.md
+@@ -1,0 +1,2 @@
++dataset_id: "12345678-1234-1234-1234-123456789abc"
++POST https://api.powerbi.com/v1.0/myorg/datasets/12345678-1234-1234-1234-123456789abc/executeQueries
+""",
+        config,
+    )
+
+    assert [finding.message for finding in findings] == [
+        "Potential real Power BI dataset ID detected",
+        "Potential real Power BI executeQueries dataset endpoint detected",
+    ]
+
+
+def test_tracked_guard_allows_powerbi_sample_identifiers() -> None:
+    config = _load_tracked_guard_config()
+
+    findings = deterministic_scan(
+        ["README.md"],
+        """diff --git a/README.md b/README.md
++++ b/README.md
+@@ -1,0 +1,4 @@
++Data Source=powerbi://api.powerbi.com/v1.0/myorg/SampleWorkspace
++Data Source=powerbi://api.powerbi.com/v1.0/myorg/YourWorkspace
++dataset_id: "00000000-0000-0000-0000-000000000000"
++POST https://api.powerbi.com/v1.0/myorg/datasets/00000000-0000-0000-0000-000000000000/executeQueries
+""",
+        config,
+    )
+
+    assert findings == []
+
+
+def test_tracked_guard_allows_mock_contoso_overview_file() -> None:
+    config = _load_tracked_guard_config()
+
+    findings = deterministic_scan(
+        ["Connections/mock_contoso_overview.md"],
+        "",
+        config,
+    )
+
+    assert findings == []
 
 
 def test_load_guard_config_merges_tracked_and_local_files(tmp_path, monkeypatch) -> None:

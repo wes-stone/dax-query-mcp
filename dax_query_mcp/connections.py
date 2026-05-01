@@ -7,7 +7,16 @@ import yaml
 from loguru import logger
 
 from .exceptions import ConfigurationError
-from .models import DAXConnectionConfig
+from .models import (
+    AUTH_AZURE_CLI,
+    DEFAULT_POWERBI_API_BASE_URL,
+    DEFAULT_POWERBI_TOKEN_ENV,
+    SUPPORTED_AUTH_MODES,
+    SUPPORTED_TRANSPORTS,
+    TRANSPORT_MSOLAP,
+    TRANSPORT_POWERBI_REST,
+    DAXConnectionConfig,
+)
 
 PREFERRED_CONNECTIONS_DIR = "Connections"
 LEGACY_CONNECTIONS_DIR = "queries"
@@ -38,6 +47,7 @@ def create_sample_connection_config(connections_dir: str | Path) -> Path:
         return sample_path
 
     sample_yaml = """# Sample DAX Connection Configuration
+# transport defaults to "msolap" when omitted
 connection_string: |
   Provider=MSOLAP.8;
   Data Source=powerbi://api.powerbi.com/v1.0/myorg/YourWorkspace?readonly;
@@ -51,6 +61,11 @@ description: "Semantic model connection for ad hoc DAX queries"
 # connection_timeout_seconds: 300
 # command_timeout_seconds: 1800
 # max_rows: 50000
+#
+# Optional Power BI REST transport example:
+# transport: powerbi_rest
+# dataset_id: "00000000-0000-0000-0000-000000000000"
+# auth_mode: azure_cli
 """
 
     sample_path.write_text(sample_yaml, encoding="utf-8")
@@ -76,7 +91,11 @@ def load_connections(
         create_sample_connection_config(directory)
         return {}
 
-    config_files = sorted(directory.glob("*.yaml")) + sorted(directory.glob("*.yml"))
+    config_files = [
+        config_file
+        for config_file in sorted(directory.glob("*.yaml")) + sorted(directory.glob("*.yml"))
+        if _is_connection_config_file(config_file)
+    ]
     if not config_files:
         logger.warning(f"No YAML connection files found in {directory}")
         create_sample_connection_config(directory)
@@ -116,17 +135,43 @@ def _is_placeholder_connection_file(config_file: Path) -> bool:
     return config_file.stem == SAMPLE_CONNECTION_STEM
 
 
+def _is_connection_config_file(config_file: Path) -> bool:
+    return not config_file.name.endswith(".data_dictionary.yaml")
+
+
 def _build_connection_config(
     connection_name: str,
     raw_config: dict[str, Any],
     source: Path,
 ) -> DAXConnectionConfig:
-    connection_string = _require_string(raw_config, "connection_string", connection_name, source)
+    transport = _coerce_transport(raw_config.get("transport", TRANSPORT_MSOLAP), connection_name, source)
+    if transport == TRANSPORT_POWERBI_REST:
+        connection_string = _optional_string(raw_config.get("connection_string"), "connection_string", connection_name, source) or ""
+        dataset_id = _require_string(raw_config, "dataset_id", connection_name, source)
+    else:
+        connection_string = _require_string(raw_config, "connection_string", connection_name, source)
+        dataset_id = _optional_string(raw_config.get("dataset_id"), "dataset_id", connection_name, source)
+
     description = _optional_string(raw_config.get("description"), "description", connection_name, source)
     suggested_skill = _optional_string(raw_config.get("suggested_skill"), "suggested_skill", connection_name, source)
     suggested_skill_reason = _optional_string(
         raw_config.get("suggested_skill_reason"),
         "suggested_skill_reason",
+        connection_name,
+        source,
+    )
+    auth_mode = _coerce_auth_mode(raw_config.get("auth_mode", AUTH_AZURE_CLI), connection_name, source)
+    access_token_env = (
+        _optional_string(raw_config.get("access_token_env"), "access_token_env", connection_name, source)
+        or DEFAULT_POWERBI_TOKEN_ENV
+    )
+    api_base_url = (
+        _optional_string(raw_config.get("api_base_url"), "api_base_url", connection_name, source)
+        or DEFAULT_POWERBI_API_BASE_URL
+    )
+    impersonated_user_name = _optional_string(
+        raw_config.get("impersonated_user_name"),
+        "impersonated_user_name",
         connection_name,
         source,
     )
@@ -160,6 +205,12 @@ def _build_connection_config(
         description=description,
         suggested_skill=suggested_skill,
         suggested_skill_reason=suggested_skill_reason,
+        transport=transport,
+        dataset_id=dataset_id,
+        auth_mode=auth_mode,
+        access_token_env=access_token_env,
+        api_base_url=api_base_url.rstrip("/"),
+        impersonated_user_name=impersonated_user_name,
         connection_timeout_seconds=connection_timeout_seconds,
         command_timeout_seconds=command_timeout_seconds,
         max_rows=max_rows,
@@ -177,6 +228,30 @@ def _require_string(raw_config: dict[str, Any], key: str, connection_name: str, 
             f"Connection '{connection_name}' in {source.name} must define a non-empty '{key}' string"
         )
     return value.strip()
+
+
+def _coerce_transport(value: Any, connection_name: str, source: Path) -> str:
+    transport = _optional_string(value, "transport", connection_name, source) or TRANSPORT_MSOLAP
+    normalized = transport.lower()
+    if normalized not in SUPPORTED_TRANSPORTS:
+        supported = ", ".join(sorted(SUPPORTED_TRANSPORTS))
+        raise ConfigurationError(
+            f"Connection '{connection_name}' in {source.name} has unsupported transport "
+            f"'{transport}'. Supported transports: {supported}"
+        )
+    return normalized
+
+
+def _coerce_auth_mode(value: Any, connection_name: str, source: Path) -> str:
+    auth_mode = _optional_string(value, "auth_mode", connection_name, source) or AUTH_AZURE_CLI
+    normalized = auth_mode.lower()
+    if normalized not in SUPPORTED_AUTH_MODES:
+        supported = ", ".join(sorted(SUPPORTED_AUTH_MODES))
+        raise ConfigurationError(
+            f"Connection '{connection_name}' in {source.name} has unsupported auth_mode "
+            f"'{auth_mode}'. Supported auth modes: {supported}"
+        )
+    return normalized
 
 
 def _optional_string(value: Any, key: str, connection_name: str, source: Path) -> str | None:

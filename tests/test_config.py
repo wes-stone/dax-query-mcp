@@ -60,3 +60,29 @@ def test_create_sample_config_is_written_once(tmp_path: Path) -> None:
     assert second_path == sample_path
     assert second_path.read_text(encoding="utf-8") == first_contents
 
+
+def test_load_queries_supports_powerbi_rest_transport(tmp_path: Path) -> None:
+    (tmp_path / "rest_query.yaml").write_text(
+        """
+transport: powerbi_rest
+dataset_id: "00000000-0000-0000-0000-000000000000"
+auth_mode: env
+access_token_env: "TEST_POWERBI_TOKEN"
+dax_query: |
+  EVALUATE ROW("Value", 1)
+description: "REST query"
+max_rows: 100
+""".strip(),
+        encoding="utf-8",
+    )
+
+    queries = load_queries(tmp_path)
+    query = queries["rest_query"]
+
+    assert query.transport == "powerbi_rest"
+    assert query.connection_string == ""
+    assert query.dataset_id == "00000000-0000-0000-0000-000000000000"
+    assert query.auth_mode == "env"
+    assert query.access_token_env == "TEST_POWERBI_TOKEN"
+    assert query.max_rows == 100
+

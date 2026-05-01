@@ -6,18 +6,24 @@ __pycache__/
 build/
 dist/
 export/
+# Local query and connection artifacts can contain private workspace names,
+# dataset IDs, tokens, or semantic-model context.
 queries/*.yaml
 queries/*.dax
 queries/*.queryBuilder
 Connections/*.yaml
 Connections/*.yml
 Connections/*.md
+Connections/*.json
+Connections/*.env
 !Connections/sample_connection.yaml
 !Connections/sample_connection.md
 !Connections/mock_contoso.yaml
+!Connections/mock_contoso_overview.md
 !Connections/mock_contoso.md
 !Connections/mock_contoso.data_dictionary.yaml
 !queries/sample_query.yaml
 .copilot-guard.local.json
 *.csv
 *.xlsx
+.github

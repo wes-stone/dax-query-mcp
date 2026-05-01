@@ -17,20 +17,25 @@ Check out [making use of skills and extensions](docs/dax-mcp-skill-and-extension
 
 ## Prerequisites
 
-1. **Windows** — the server uses COM/ADODB under the hood, so it's Windows-only.
-2. **MSOLAP provider** — the OLE DB driver that talks to Power BI semantic models.
+1. **uv** — Python package manager. Install with:
+   ```powershell
+   winget install astral-sh.uv
+   ```
+2. **For MSOLAP connections: Windows + MSOLAP provider** — the default transport uses COM/ADODB.
    Download from [Microsoft](https://learn.microsoft.com/en-us/analysis-services/client-libraries?view=asallproducts-allversions) — grab the **"AMO + ADOMD.NET"** or **"MSOLAP (OLE DB)"** installer. If you already have Power BI Desktop, Excel with Power Pivot, or SSMS installed, you likely have it.
    
    To check: open PowerShell and run:
    ```powershell
    (New-Object System.Data.OleDb.OleDbEnumerator).GetElements() | Where-Object { $_.SOURCES_NAME -like "*MSOLAP*" }
-   ```
-   If that returns a row, you're good.
-
-3. **uv** — Python package manager. Install with:
-   ```powershell
-   winget install astral-sh.uv
-   ```
+    ```
+    If that returns a row, you're good.
+3. **For Power BI REST connections: Azure CLI or access token** — REST uses the Power BI `executeQueries` API and does not require Windows or MSOLAP.
+    ```powershell
+    az login --allow-no-subscriptions
+    ```
+   On Windows, the standard Azure CLI install path is auto-detected if `az` is
+   not on `PATH`. For custom installs, set `AZURE_CLI_PATH` to the full
+   `az.cmd` path.
 
 ## Quick start
 
@@ -57,7 +62,8 @@ The YAML file provides access to the model; the companion context files are the
 layer that makes Copilot useful because they explain the model in business terms.
 
 Create `Connections/my_model.yaml` for the connection string and runtime
-settings:
+settings. When `transport` is omitted, it defaults to `msolap`, so existing
+connection files keep working unchanged:
 
 ```yaml
 connection_string: |
@@ -69,11 +75,28 @@ description: "My semantic model"
 command_timeout_seconds: 1800
 ```
 
+For a REST-backed connection, use `transport: powerbi_rest` and the Power BI
+dataset ID instead of an MSOLAP connection string:
+
+```yaml
+transport: powerbi_rest
+dataset_id: "00000000-0000-0000-0000-000000000000"
+description: "My semantic model via Power BI REST"
+auth_mode: azure_cli
+command_timeout_seconds: 1800
+max_rows: 50000
+```
+
+REST execution always uses the dataset-only `executeQueries` endpoint:
+`https://api.powerbi.com/v1.0/myorg/datasets/{dataset_id}/executeQueries`.
+Do not put `/groups/{workspace_id}` in `api_base_url`; workspace-scoped REST
+paths can fail for Build-only access even when the dataset-only endpoint works.
+
 Then add context files with the same connection name:
 
 | File | Purpose |
 | ---- | ------- |
-| `Connections/my_model.yaml` | Required connection string, description, timeouts, and row limits. |
+| `Connections/my_model.yaml` | Required runtime config: MSOLAP connection string or REST dataset ID, plus description, timeouts, and row limits. |
 | `Connections/my_model_overview.md` | Optional compact overview used first by `get_connection_context`; include the most important tables, measures, filters, and example queries. |
 | `Connections/my_model.md` | Optional full model context; include detailed table notes, business definitions, caveats, relationships, and query patterns. |
 | `Connections/my_model.data_dictionary.yaml` | Optional structured dictionary used by `get_data_dictionary`, `get_schema`, `search_columns`, and `search_measures`; include tables, columns, measures, filters, descriptions, and sample values. |
@@ -85,9 +108,9 @@ Recommended setup flow:
 3. Add the fuller `.md` context for detailed business logic, naming conventions, and examples.
 4. Add or generate the `.data_dictionary.yaml` so tools can search fields and measures structurally.
 
-You can create the dictionary manually or scaffold one from the live model with
-the `generate_data_dictionary` MCP tool, then fill in business descriptions and
-sample values.
+You can create the dictionary manually or, for MSOLAP connections, scaffold one
+from the live model with the `generate_data_dictionary` MCP tool, then fill in
+business descriptions and sample values.
 
 ### 3. Wire up MCP
 
@@ -135,11 +158,110 @@ Ask Copilot (or any MCP client):
 
 The server returns plain markdown — results render as tables directly in chat.
 
+## Demo without Power BI: Mock Contoso
+
+The repo includes a safe, deterministic `mock_contoso` connection for README
+screenshots, demos, tests, and local development. It uses `MOCK://contoso`, so
+it does not require Azure login, Power BI permissions, MSOLAP server access, or
+private dataset IDs.
+
+Use it to show the full MCP workflow:
+
+| Step | Prompt to capture | Feature shown |
+| --- | --- | --- |
+| 1 | `List my DAX connections.` | Connection discovery with `connection_type` |
+| 2 | `Get the connection context for mock_contoso.` | Overview/context layer |
+| 3 | `Search measures for sales in mock_contoso.` | Structured data dictionary search |
+| 4 | `Search columns for category in mock_contoso.` | Column search across model metadata |
+| 5 | `Run the Contoso sales summary query.` | DAX execution and markdown result table |
+| 6 | `Inspect the mock_contoso connection.` | Live schema inspection via safe MDSCHEMA rowsets |
+| 7 | `Export the Contoso sales summary to CSV.` | Export workflow |
+
+### Mock Contoso context layer
+
+The demo connection is a complete connection bundle. This is the feature worth
+showing in screenshots: the model is not just a connection string, it includes
+LLM-readable context and structured metadata.
+
+```text
+Connections/
+  mock_contoso.yaml
+  mock_contoso_overview.md
+  mock_contoso.md
+  mock_contoso.data_dictionary.yaml
+```
+
+| File | Used by | What it teaches the agent |
+| --- | --- | --- |
+| `mock_contoso.yaml` | `list_connections`, query execution | Connection name, connection type, runtime settings |
+| `mock_contoso_overview.md` | `get_connection_context(..., detail="overview")` | Fast summary: tables, measures, demo queries, screenshot prompts |
+| `mock_contoso.md` | `get_connection_context(..., detail="full")` | Deeper guidance and the end-to-end demo walkthrough |
+| `mock_contoso.data_dictionary.yaml` | `get_data_dictionary`, `get_schema`, `search_columns`, `search_measures` | Searchable tables, columns, measures, filters, descriptions, and sample values |
+
+Connection YAML:
+
+```yaml
+connection_string: "MOCK://contoso"
+description: "Mock Contoso Sales cube for testing and development"
+connection_timeout_seconds: 30
+command_timeout_seconds: 300
+```
+
+Overview excerpt:
+
+```markdown
+## Tables
+
+| Table | Purpose | Useful columns |
+| --- | --- | --- |
+| `Sales` | Transaction fact table | `SalesKey`, `ProductKey`, `DateKey`, `Quantity`, `Amount` |
+| `Products` | Product dimension | `ProductKey`, `ProductName`, `Category`, `Price` |
+| `Calendar` | Date dimension for 2025 | `DateKey`, `Date`, `Month`, `MonthNum`, `Year`, `Weekday` |
+```
+
+Data dictionary excerpt:
+
+```yaml
+measures:
+  - name: Total Sales
+    expression: SUM(Sales[Amount])
+    description: Sum of all sales amounts
+    format_string: "$#,##0.00"
+filters:
+  - name: Category Filter
+    column: Products[Category]
+    description: Filter by product category
+    suggested_values: ["Bikes", "Accessories"]
+```
+
+Good screenshot query:
+
+```dax
+EVALUATE
+SUMMARIZE(
+    Sales,
+    "Total Sales", [Total Sales],
+    "Total Quantity", [Total Quantity]
+)
+```
+
+Expected result shape:
+
+| Total_Sales | Total_Quantity |
+| --- | --- |
+| 178390.0 | 290 |
+
 ## Connection YAML
 
 ```yaml
-connection_string: "..." # required — MSOLAP connection string
+transport: "msolap" # optional — "msolap" (default) or "powerbi_rest"
+connection_string: "..." # required for MSOLAP connections
+dataset_id: "..." # required for powerbi_rest connections
 description: "..." # human-readable label
+auth_mode: "azure_cli" # REST auth: "azure_cli" (default) or "env"
+access_token_env: "POWERBI_ACCESS_TOKEN" # env var used when auth_mode="env"
+api_base_url: "https://api.powerbi.com/v1.0/myorg" # optional REST override
+impersonated_user_name: "..." # optional REST impersonation UPN
 command_timeout_seconds: 1800 # DAX query timeout
 connection_timeout_seconds: 300 # connection open timeout
 max_rows: null # row cap (null = unlimited)
@@ -194,12 +316,21 @@ filters:
     suggested_values: ["FY25", "FY26"]
 ```
 
+For `powerbi_rest` connections, the context layer is especially important:
+Power BI `executeQueries` supports DAX query execution, but not DMV/MDSCHEMA
+metadata queries. `inspect_connection` and live dictionary generation are
+available for MSOLAP connections; REST connections should rely on the overview,
+full markdown context, and `.data_dictionary.yaml`. If a model only works
+through REST with Build access, document trusted tables/measures and known-good
+queries in the context layer so agents do not try workspace-scoped metadata
+paths.
+
 ## MCP tools
 
 | Tool                        | Purpose                                              |
 | --------------------------- | ---------------------------------------------------- |
 | **Discovery**               |                                                      |
-| `list_connections`          | Discover available connections                       |
+| `list_connections`          | Discover available connections as a markdown table (`output_format="json"` for machine-readable output) |
 | `get_connection_context`    | Curated markdown context (tables, columns, measures) |
 | `search_connection_context` | Search context docs for specific terms               |
 | `inspect_connection`        | Live schema via safe `MDSCHEMA` rowsets              |
@@ -228,6 +359,26 @@ filters:
 > **Admin queries are blocked.** `INFO.*()` and `$SYSTEM.DISCOVER_*` require server admin rights.
 > Use `get_connection_context` or `inspect_connection` for metadata.
 
+### Python scaffolds
+
+`scaffold_dax_workspace` exports one query as a standalone Python project.
+`export_workstation(format="scaffold")` exports every query saved in the
+session workstation as one multi-query project.
+
+Generated projects include transport-aware connection config:
+
+| Connection type | Generated behavior |
+| --- | --- |
+| `msolap` | Uses the embedded Power BI / SSAS connection string through ADODB |
+| `powerbi_rest` | Uses Power BI REST `executeQueries` with Azure CLI or env-token auth |
+| `mock` (`MOCK://contoso`) | Runs the deterministic demo data path without Power BI or ADODB |
+
+The generated scripts use a `CONNECTION` or `CONNECTIONS` dict instead of a
+connection-string-only placeholder, so follow-through exports keep dataset ID,
+auth mode, timeout, and mock/REST metadata aligned with the named connection.
+Do not commit generated workspaces that contain private dataset IDs, workspace
+names, connection strings, or tokens.
+
 ## CLI usage
 
 ```bash
@@ -249,6 +400,10 @@ Saved `.dax` files open directly in **DAX Studio**. See `docs/` for detailed CLI
 ## Copilot guard hook
 
 A `pre-commit` hook reviews staged changes for private content (real workspace URIs, local paths, non-sample connection files).
+
+Connection files are ignored by default, and the guard blocks likely real Power
+BI workspace URIs or dataset IDs. Keep real REST dataset IDs in local,
+untracked connection files; use all-zero sample IDs in docs and tests.
 
 ```powershell
 # Install
@@ -275,7 +430,7 @@ Fails closed by default. Set `COPILOT_GUARD_FAIL_OPEN=1` to allow commits when C
 
 ## Requirements
 
-- **Windows** (COM/ADODB used for DAX execution)
-- **MSOLAP** OLE DB provider (see [Prerequisites](#prerequisites))
+- **Windows + MSOLAP** for the default `msolap` transport (COM/ADODB)
+- **Azure CLI or access token** for the optional `powerbi_rest` transport
 - **Python 3.12+** (handled automatically by `uvx`)
 - **uv** (`winget install astral-sh.uv`)

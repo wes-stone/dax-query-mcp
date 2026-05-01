@@ -18,12 +18,14 @@ from dax_query_mcp.mcp_server import (
     get_data_dictionary,
     get_query_builder_schema,
     get_schema,
+    inspect_connection_metadata,
     inspect_model_metadata,
     list_connections,
     list_workstation,
     quick_chart,
     remove_from_workstation,
     run_connection_query,
+    scaffold_dax_workspace,
     save_query_builder,
     save_to_workstation,
     scaffold_power_query,
@@ -111,7 +113,7 @@ suggested_skill_reason: "Use this when you want help building KQL from this mode
     (connections_dir / "sales.md").write_text("# Sales Model\n\nContext here.\n", encoding="utf-8")
 
     context_payload = json.loads(get_connection_context("sales", str(connections_dir)))
-    listing_payload = json.loads(list_connections(str(connections_dir)))
+    listing_payload = json.loads(list_connections(str(connections_dir), output_format="json"))
 
     assert context_payload["suggested_skill"] == "enrollment-skills"
     assert "KQL" in context_payload["suggested_skill_reason"]
@@ -161,6 +163,40 @@ description: "Sales model"
     assert "What would you like to do next?" in result
     assert "Copy to clipboard" in result
     assert "### Query preview for `sales`" in result
+
+
+def test_run_connection_query_routes_powerbi_rest_connection(monkeypatch, tmp_path) -> None:
+    connections_dir = tmp_path / "Connections"
+    connections_dir.mkdir()
+    (connections_dir / "revenue.yaml").write_text(
+        """
+transport: powerbi_rest
+dataset_id: "00000000-0000-0000-0000-000000000000"
+description: "REST model"
+auth_mode: env
+access_token_env: "TEST_POWERBI_TOKEN"
+""".strip(),
+        encoding="utf-8",
+    )
+    captured = {}
+
+    def _fake_dax_to_pandas(**kwargs):
+        captured.update(kwargs)
+        return pd.DataFrame({"Month": ["Jan"], "Revenue": [42]})
+
+    monkeypatch.setattr("dax_query_mcp.mcp_server.dax_to_pandas", _fake_dax_to_pandas)
+
+    result = run_connection_query(
+        connection_name="revenue",
+        query='EVALUATE ROW("Revenue", 42)',
+        connections_dir=str(connections_dir),
+    )
+
+    assert captured["transport"] == "powerbi_rest"
+    assert captured["dataset_id"] == "00000000-0000-0000-0000-000000000000"
+    assert captured["auth_mode"] == "env"
+    assert captured["access_token_env"] == "TEST_POWERBI_TOKEN"
+    assert "| Month | Revenue |" in result
 
 
 def test_query_builder_schema_and_error_guidance() -> None:
@@ -954,6 +990,44 @@ def test_get_schema_without_data_dictionary(tmp_path) -> None:
     assert "inspect_connection" in payload["message"]
 
 
+def test_rest_connection_schema_without_dictionary_guides_to_context(tmp_path) -> None:
+    connections_dir = tmp_path / "Connections"
+    connections_dir.mkdir()
+    (connections_dir / "revenue.yaml").write_text(
+        """
+transport: powerbi_rest
+dataset_id: "00000000-0000-0000-0000-000000000000"
+description: "REST model"
+""".strip(),
+        encoding="utf-8",
+    )
+
+    payload = json.loads(get_schema("revenue", str(connections_dir)))
+
+    assert payload["has_data_dictionary"] is False
+    assert "REST" in payload["message"]
+    assert "data dictionary" in payload["message"]
+
+
+def test_inspect_connection_metadata_rest_returns_context_message(tmp_path) -> None:
+    connections_dir = tmp_path / "Connections"
+    connections_dir.mkdir()
+    (connections_dir / "revenue.yaml").write_text(
+        """
+transport: powerbi_rest
+dataset_id: "00000000-0000-0000-0000-000000000000"
+description: "REST model"
+""".strip(),
+        encoding="utf-8",
+    )
+
+    payload = inspect_connection_metadata("revenue", connections_dir=str(connections_dir))
+
+    assert payload["transport"] == "powerbi_rest"
+    assert payload["live_metadata_supported"] is False
+    assert "MDSCHEMA" in payload["message"]
+
+
 # ── generate_data_dictionary tests ───────────────────────────────────
 
 
@@ -1042,6 +1116,42 @@ def test_generate_data_dictionary_correct_counts(tmp_path) -> None:
     assert "Avg Price" in measure_names
     assert "Product Count" in measure_names
     assert "Day Count" in measure_names
+
+
+def test_generate_data_dictionary_rest_uses_existing_dictionary_message(tmp_path) -> None:
+    connections_dir = tmp_path / "Connections"
+    connections_dir.mkdir()
+    (connections_dir / "revenue.yaml").write_text(
+        """
+transport: powerbi_rest
+dataset_id: "00000000-0000-0000-0000-000000000000"
+description: "REST model"
+""".strip(),
+        encoding="utf-8",
+    )
+    (connections_dir / "revenue.data_dictionary.yaml").write_text(
+        """
+version: "1.0"
+tables:
+  - name: Sales
+    columns:
+      - name: Amount
+        data_type: decimal
+measures:
+  - name: Total Sales
+    expression: SUM(Sales[Amount])
+filters: []
+""".strip(),
+        encoding="utf-8",
+    )
+
+    payload = json.loads(generate_data_dictionary("revenue", str(connections_dir)))
+
+    assert payload["transport"] == "powerbi_rest"
+    assert payload["generated"] is False
+    assert payload["table_count"] == 1
+    assert payload["measure_count"] == 1
+    assert "data_dictionary" in payload
 
 
 # ── followup_menu resource tests ────────────────────────────────────────
@@ -1335,6 +1445,101 @@ def test_export_workstation_scaffold(tmp_path) -> None:
     assert "ipykernel" in pyproject
 
 
+def test_scaffold_dax_workspace_uses_rest_connection_metadata(tmp_path) -> None:
+    """MCP single-query scaffold embeds REST metadata from the named connection."""
+    connections_dir = tmp_path / "Connections"
+    connections_dir.mkdir()
+    (connections_dir / "revenue.yaml").write_text(
+        """
+transport: powerbi_rest
+dataset_id: "00000000-0000-0000-0000-000000000000"
+description: "REST model"
+auth_mode: env
+access_token_env: "TEST_POWERBI_TOKEN"
+""".strip(),
+        encoding="utf-8",
+    )
+
+    out_dir = tmp_path / "single_rest"
+    payload = json.loads(
+        scaffold_dax_workspace(
+            output_dir=str(out_dir),
+            query_text='EVALUATE ROW("Ping", 1)',
+            connection_name="revenue",
+            connections_dir=str(connections_dir),
+        )
+    )
+
+    assert payload["query_filename"] == "query.dax"
+    script = (out_dir / "run_query.py").read_text(encoding="utf-8")
+    compile(script, "run_query.py", "exec")
+    assert '"transport": "powerbi_rest"' in script
+    assert '"dataset_id": "00000000-0000-0000-0000-000000000000"' in script
+    assert '"auth_mode": "env"' in script
+    assert '"access_token_env": "TEST_POWERBI_TOKEN"' in script
+
+
+def test_export_workstation_scaffold_preserves_connection_transports(tmp_path) -> None:
+    """Workstation scaffold exports runnable configs for REST and MOCK connections."""
+    connections_dir = tmp_path / "Connections"
+    connections_dir.mkdir()
+    (connections_dir / "rest_model.yaml").write_text(
+        """
+transport: powerbi_rest
+dataset_id: "00000000-0000-0000-0000-000000000000"
+description: "REST model"
+auth_mode: env
+access_token_env: "TEST_POWERBI_TOKEN"
+""".strip(),
+        encoding="utf-8",
+    )
+    (connections_dir / "mock_model.yaml").write_text(
+        'connection_string: "MOCK://contoso"\ndescription: "Mock model"\n',
+        encoding="utf-8",
+    )
+
+    save_to_workstation(
+        connection_name="rest_model",
+        query='EVALUATE ROW("Ping", 1)',
+        description="REST ping",
+        query_name="rest_ping",
+        connections_dir=str(connections_dir),
+    )
+    save_to_workstation(
+        connection_name="mock_model",
+        query='EVALUATE ROW("Ping", 1)',
+        description="Mock ping",
+        query_name="mock_ping",
+        connections_dir=str(connections_dir),
+    )
+
+    out_dir = tmp_path / "transport_export"
+    payload = json.loads(
+        export_workstation(
+            output_dir=str(out_dir),
+            connections_dir=str(connections_dir),
+            format="scaffold",
+        )
+    )
+
+    assert payload["project_name"] == "transport_export"
+    script = (out_dir / "run_queries.py").read_text(encoding="utf-8")
+    compile(script, "run_queries.py", "exec")
+    assert '"transport": "powerbi_rest"' in script
+    assert '"dataset_id": "00000000-0000-0000-0000-000000000000"' in script
+    assert "TEST_POWERBI_TOKEN" in script
+    assert "MOCK://contoso" in script
+    assert "powerbi_rest_to_pandas" in script
+
+    namespace = {"__name__": "generated_run_queries"}
+    exec(script, namespace)
+    dataframe = namespace["execute_dax"](
+        'EVALUATE ROW("Ping", 1)',
+        namespace["CONNECTIONS"]["mock_model"],
+    )
+    assert dataframe.iloc[0]["Ping"] == 1
+
+
 def test_export_workstation_dax(tmp_path) -> None:
     """Exports only .dax files in dax format."""
     connections_dir = tmp_path / "Connections"
@@ -1460,9 +1665,42 @@ def test_list_connections_shows_overview_status(tmp_path) -> None:
     )
     (connections_dir / "myconn_overview.md").write_text("# Overview")
 
-    payload = json.loads(list_connections(str(connections_dir)))
+    payload = json.loads(list_connections(str(connections_dir), output_format="json"))
 
     conn = payload["connections"][0]
+    assert conn["transport"] == "msolap"
+    assert conn["connection_type"] == "msolap"
     assert conn["has_overview"] is True
     assert conn["has_full_context"] is False
 
+
+def test_list_connections_defaults_to_markdown_table(tmp_path) -> None:
+    """list_connections returns a presentation-ready markdown table by default."""
+    connections_dir = tmp_path / "conns"
+    connections_dir.mkdir()
+    (connections_dir / "mock.yaml").write_text(
+        'connection_string: "MOCK://contoso"\ndescription: "Mock | demo"\n',
+        encoding="utf-8",
+    )
+
+    markdown = list_connections(str(connections_dir))
+
+    assert markdown.startswith("Found 1 DAX connection")
+    assert "| Connection | Description | Type | Transport | Overview | Full context |" in markdown
+    assert "| `mock` | Mock \\| demo | mock | msolap | No | No |" in markdown
+
+
+def test_list_connections_marks_mock_connection_type(tmp_path) -> None:
+    """list_connections marks MOCK:// connections as mock."""
+    connections_dir = tmp_path / "conns"
+    connections_dir.mkdir()
+    (connections_dir / "mock.yaml").write_text(
+        'connection_string: "MOCK://contoso"\ndescription: "Mock"',
+        encoding="utf-8",
+    )
+
+    payload = json.loads(list_connections(str(connections_dir), output_format="json"))
+
+    conn = payload["connections"][0]
+    assert conn["transport"] == "msolap"
+    assert conn["connection_type"] == "mock"
