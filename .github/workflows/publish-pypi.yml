@@ -1,0 +1,76 @@
+name: Publish to PyPI
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  id-token: write
+
+concurrency:
+  group: pypi-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Build and publish
+    runs-on: windows-latest
+    if: github.repository == 'wes-stone/dax-query-mcp' && github.ref == 'refs/heads/main'
+    env:
+      PYPI_API_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --locked --group dev
+
+      - name: Run tests
+        run: uv run pytest -m "not ai_integration"
+
+      - name: Prepare release version
+        id: release-version
+        run: uv run python scripts\prepare_release_version.py --write
+
+      - name: Build distributions
+        run: uv build
+
+      - name: Publish distributions with API token
+        if: env.PYPI_API_TOKEN != ''
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN }}
+          skip-existing: true
+
+      - name: Publish distributions with trusted publishing
+        if: env.PYPI_API_TOKEN == ''
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true
+
+      - name: Commit release version
+        run: |
+          $version = "${{ steps.release-version.outputs.release_version }}"
+          if (-not (git status --porcelain pyproject.toml)) {
+            Write-Output "pyproject.toml already has version $version."
+            exit 0
+          }
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add pyproject.toml
+          git commit -m "chore: bump version to $version [skip ci]"
+          git push

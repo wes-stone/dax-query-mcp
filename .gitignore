@@ -26,4 +26,4 @@ Connections/*.env
 .copilot-guard.local.json
 *.csv
 *.xlsx
-.github
+.github/copilot-guard.json
