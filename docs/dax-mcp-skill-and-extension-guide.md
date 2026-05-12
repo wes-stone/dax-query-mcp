@@ -40,12 +40,13 @@ mkdir -p ~/.copilot/skills/dax-query
 Create `~/.copilot/skills/dax-query/SKILL.md` with the following content.
 Customize the sections marked with `<!-- CUSTOMIZE -->` for your environment.
 
-```markdown
+````markdown
 ---
 name: dax-query
 description: >
   Skill for querying Power BI / Analysis Services data using the
-  dax-query-server MCP. Covers connection discovery, schema exploration,
+  dax-query-server MCP. Covers connection discovery, progressive context,
+  relationship-aware schema exploration,
   DAX execution, workstation management, exports, scaffolding, and
   follow-up workflows. Triggers on DAX query, Power BI data, run query,
   connection, semantic model, workstation, export CSV, scaffold, chart.
@@ -71,17 +72,26 @@ description: >
    "What would you like to do next?" menu.
 4. **Call `get_connection_context` once per session** before writing your first
    query. Don't re-read it every turn.
-5. **Never run admin queries.** No `INFO.*()`, `$SYSTEM.DISCOVER_*`, `DBCC`,
-   `ALTER`, `CREATE`, `DELETE`, `DROP`. Use `get_connection_context` or
-   `inspect_connection` for metadata.
+5. **Use progressive context when needed.** Start compact, then drill into
+   `get_context_bundle`, `get_table_detail`, `get_measure_detail`,
+   `get_relationships`, and `get_filter_suggestions` instead of loading
+   everything.
+6. **Preserve discovered context.** Exploration can discover
+   tables/measures/relationships, but durable knowledge belongs in overview/full
+   markdown and `.data_dictionary.yaml`.
+7. **Never run admin queries.** No `INFO.*()`, `$SYSTEM.DISCOVER_*`, `DBCC`,
+   `ALTER`, `CREATE`, `DELETE`, `DROP`. Use context tools, `inspect_connection`,
+   or `generate_data_dictionary` for metadata.
 
 ---
 
 ## 2. First-Time Workflow
 
 ```
-Step 1 → list_connections()                        # discover what's available
-Step 2 → get_connection_context("my_connection")   # learn the schema
+Step 1 → list_connections()                             # discover what's available
+Step 2 → get_connection_context("my_connection")        # compact model overview
+Step 2b → get_context_bundle("my_connection")           # optional structured counts/relationships
+Step 2c → get_table_detail / get_measure_detail / get_relationships only if needed
 Step 3 → run_connection_query("my_connection", "EVALUATE SUMMARIZECOLUMNS(...)")
          ↳ Output the ENTIRE returned string verbatim (table + menu)
 Step 4 → User picks from the follow-up menu (e.g., "3" = save to workstation)
@@ -94,9 +104,10 @@ User: "Show me revenue by month"
 
 You should:
 1. Call get_connection_context("my_connection") if not already cached
-2. Build DAX: EVALUATE SUMMARIZECOLUMNS('Calendar'[Month], "Revenue", [Revenue])
-3. Call run_connection_query("my_connection", <DAX>)
-4. Output the full result verbatim — table AND numbered menu
+2. Use search_measures/search_columns and scoped context tools to resolve exact names
+3. Build DAX: EVALUATE SUMMARIZECOLUMNS('Calendar'[Month], "Revenue", [Revenue])
+4. Call run_connection_query("my_connection", <DAX>)
+5. Output the full result verbatim — table AND numbered menu
 ```
 
 ---
@@ -108,7 +119,7 @@ You should:
 | Tool | When to Use |
 |------|-------------|
 | `list_connections` | First thing — discover available connections |
-| `get_connection_context` | Before first query — learn schema, tables, measures |
+| `get_connection_context` | Before first query — compact model overview, tables, measures |
 | `run_connection_query` | **Primary tool** — execute DAX against a named connection |
 | `run_ad_hoc_query` | Execute DAX with a raw connection string |
 | `run_named_query` | Execute a pre-configured named query |
@@ -121,7 +132,32 @@ You should:
 | `search_columns` | Fuzzy-search columns by name |
 | `search_measures` | Fuzzy-search measures by name or expression |
 | `get_data_dictionary` | Structured JSON data dictionary |
+| `get_context_bundle` | Progressive structured context: overview counts, schema, relationships, next levels |
+| `get_table_detail` | Drill into one table, including columns and related relationships |
+| `get_measure_detail` | Drill into one measure, expression, description, and format string |
+| `get_relationships` | Inspect relationship paths globally or for one table |
+| `get_filter_suggestions` | Get curated filter columns and suggested values |
 | `inspect_connection` | Live schema via MDSCHEMA rowsets |
+| `generate_data_dictionary` | Scaffold `.data_dictionary.yaml` from live MDSCHEMA metadata, with TMSCHEMA relationships when available |
+| `check_ai_readiness` | Find missing descriptions, ambiguous columns, missing filters, or undocumented relationships |
+| `check_context_staleness` | Compare live model metadata with the saved data dictionary |
+| `probe_tmschema_capabilities` | Check whether richer relationship metadata is available for an MSOLAP connection |
+
+### Progressive Context Pattern
+
+Use this pattern when the compact overview is not enough:
+
+```
+get_connection_context(connection, detail="overview")
+→ search_measures/search_columns for likely names
+→ get_context_bundle(connection, detail="overview") for counts and relationship summary
+→ get_table_detail/get_measure_detail/get_relationships only for relevant objects
+→ run_connection_query
+```
+
+Do **not** force full context every turn. The improved context layer keeps agents
+focused: start small, drill in, then preserve useful discoveries in markdown or
+the dictionary so the next session starts smarter.
 
 ### Export & Output
 
@@ -157,7 +193,8 @@ You should:
 
 ## 4. Follow-Up Menu Mapping
 
-After every query, the tool returns a numbered menu. Map user selections:
+After every query, the tool returns a server-authored numbered menu. Output it
+exactly as returned, do not generate your own version, then map user selections:
 
 | User Says | Tool to Call |
 |-----------|-------------|
@@ -209,7 +246,7 @@ What would you like to do next?
 
 | Error | What to Do |
 |-------|------------|
-| `ADMIN_QUERY_BLOCKED` | Rewrite with EVALUATE or use `get_connection_context` |
+| `ADMIN_QUERY_BLOCKED` | Rewrite with EVALUATE or use context tools |
 | `CONNECTION_NOT_FOUND` | Call `list_connections`, retry with correct name |
 | `QUERY_TIMEOUT` | Add filters (TREATAS, TOPN), simplify query |
 | `EXECUTION_FAILED` | Check names via `get_connection_context`, fix syntax |
@@ -243,7 +280,115 @@ EVALUATE SUMMARIZECOLUMNS(...) ORDER BY 'Calendar'[MonthId]
 ```
 
 **Naming:** `'Table'[Column]` — single quotes for tables, brackets for columns.
+
+---
+
+## 8. Connection Architecture
+
+Connections are YAML files in a configurable directory:
+
+```yaml
+# ~/.copilot/dax-query-mcp/Connections/my_connection.yaml
+connection_string: "Provider=MSOLAP;Data Source=localhost:PORT;..."
+description: "My Power BI dataset"
+connection_timeout_seconds: 300
+command_timeout_seconds: 1800
+max_rows: 50000
 ```
+
+Each connection can have companion files:
+- `my_connection_overview.md` — compact overview used first by `get_connection_context(detail="overview")`
+- `my_connection.md` — full detailed context with business rules, caveats, relationships, and examples
+- `my_connection.data_dictionary.yaml` — structured tables, columns, measures, filters, relationships, descriptions, and sample values
+
+The default connections directory is set by `DAX_QUERY_MCP_CONNECTIONS_DIR`, or
+falls back to `~/.copilot/dax-query-mcp/Connections/`.
+
+### Data Dictionary Shape
+
+Existing dictionaries still work. Add relationships and richer descriptions over
+time; relationships are optional but make DAX generation much more reliable.
+
+```yaml
+relationships:
+  - from_table: Sales
+    from_column: ProductKey
+    to_table: Products
+    to_column: ProductKey
+    cardinality: many-to-one
+    cross_filter_direction: single
+    is_active: true
+    description: Sales rows roll up to product attributes through ProductKey
+    source: curated
+    confidence: high
+```
+
+Best mental model: exploration generates context; the overview, full markdown,
+and data dictionary preserve it.
+
+---
+
+## 9. Workstation Workflow
+
+The workstation is an **in-memory scratchpad** for iterative query exploration:
+
+```
+1. Run queries → refine → run again
+2. When you like a query: save_to_workstation(connection, query, "description")
+3. Accumulate several queries over the session
+4. When done: export_workstation(output_dir, format="scaffold")
+   → Creates portable Python project with all your queries
+```
+
+The workstation resets when the server restarts. This is intentional. Use
+`export_workstation` to make queries permanent.
+
+---
+
+## 10. Common Workflows
+
+### "Show me data about X"
+```
+get_connection_context → search/context drill-in if needed → build DAX → run_connection_query → output verbatim
+```
+
+### "Save this and export later"
+```
+save_to_workstation → more queries → save_to_workstation → export_workstation
+```
+
+### "I want to use this in Excel"
+```
+Option A: copy_to_clipboard(format="tsv") → paste into Excel
+Option B: scaffold_power_query → paste M code into Power Query Editor
+Option C: export_to_csv → open CSV in Excel
+```
+
+### "Build me a dashboard"
+```
+scaffold_streamlit_app → user gets complete .py file → uv run streamlit run app.py
+```
+
+### "What columns have revenue?"
+```
+search_columns("my_connection", "revenue") → get fuzzy matches → use in DAX
+```
+
+### "Which measure calculates ARR?"
+```
+search_measures("my_connection", "ARR") → get name + expression → use in DAX
+```
+
+### "How does this model join?"
+```
+get_context_bundle("my_connection") → get_relationships("my_connection", "Sales") → use filter paths correctly
+```
+
+### "Is my context good enough?"
+```
+check_ai_readiness("my_connection") → fill missing descriptions/relationships/filters → check_context_staleness("my_connection")
+```
+````
 
 ### Step 3: Verify the skill loads
 
@@ -333,8 +478,10 @@ Use the dax-query-server MCP tools — do NOT write Python scripts.
 
 **Workflow:**
 1. list_connections → discover connections
-2. get_connection_context(connection_name) → learn schema (once per session)
-3. run_connection_query(connection_name, query) → execute DAX
+2. get_connection_context(connection_name) → compact overview (once per session)
+3. Use search/context tools only when needed:
+   get_context_bundle, get_table_detail, get_measure_detail, get_relationships
+4. run_connection_query(connection_name, query) → execute DAX
 
 **CRITICAL OUTPUT RULE:** When run_connection_query returns results,
 output the ENTIRE returned string verbatim — the data table AND the
@@ -366,7 +513,8 @@ truncate, convert to bullet points, or omit the menu.`,
                 return {
                     additionalContext:
                         "The DAX query failed. Check column/table names via " +
-                        "get_connection_context or search_columns. Common " +
+                        "get_connection_context, search_columns, search_measures, " +
+                        "or scoped context tools. Common " +
                         "issues: wrong column name, missing single quotes " +
                         "around table names, or referencing a measure that " +
                         "doesn't exist in this model.",
@@ -417,7 +565,7 @@ const TOOL_ROUTES = [
         name: "DAX / Power BI queries",
         keywords: /\b(dax|power\s*bi|summarizecolumns|evaluate\b|semantic\s*model|run.*query)/i,
         context: `## DAX Query Instructions
-Use dax-query-server MCP tools. Workflow: list_connections → get_connection_context → run_connection_query.
+Use dax-query-server MCP tools. Workflow: list_connections → get_connection_context → search/context drill-in if needed → run_connection_query.
 Output the ENTIRE result verbatim including the "What would you like to do next?" menu.`,
     },
     // <!-- CUSTOMIZE: Add routes for your other MCP servers -->
@@ -483,9 +631,9 @@ const session = await joinSession({
 │  │  dax-query-mcp  │   │   Skill     │   │  Extension   │  │
 │  │  (MCP Server)   │   │  (SKILL.md) │   │  (.mjs hook) │  │
 │  │                 │   │             │   │              │  │
-│  │  26+ tools      │   │  Teaches    │   │  Enforces    │  │
+│  │  30+ tools      │   │  Teaches    │   │  Enforces    │  │
 │  │  Connections    │   │  workflows  │   │  behavior    │  │
-│  │  Query engine   │   │  Tool refs  │   │  at runtime  │  │
+│  │  Context layer  │   │  Tool refs  │   │  at runtime  │  │
 │  └────────┬────────┘   └──────┬──────┘   └──────┬───────┘  │
 │           │                   │                  │          │
 │           └───────────────────┼──────────────────┘          │
@@ -576,8 +724,9 @@ Before using, customize these sections:
   (product names, metric names, team-specific jargon)
 - [ ] **Extension TOOL_ROUTES** — If you use other MCP servers, add routing
   entries for them
-- [ ] **Connection context docs** — Create `.md` files alongside your connection
-  YAML files to document tables, measures, and common query patterns
+- [ ] **Connection context docs** — Create `_overview.md`, full `.md`, and
+  `.data_dictionary.yaml` companions alongside connection YAML files to document
+  tables, measures, relationships, filters, and common query patterns
 
 ---
 
