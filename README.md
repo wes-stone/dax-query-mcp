@@ -9,8 +9,9 @@ Check out [making use of skills and extensions](docs/dax-mcp-skill-and-extension
 ## Features
 
 - **Connection-centric MCP server** — discover models, query with DAX, inspect schemas
-- **Curated context** — teach the LLM your model via markdown docs (no admin privileges needed)
+- **Relationship-aware context** — teach the LLM your model with markdown, structured dictionaries, relationships, and progressive context bundles
 - **Fuzzy search** — search columns and measures across tables by name or description
+- **Server-authored follow-ups** — every query response includes a durable next-step workflow for exports, charts, scaffolds, and workstation saves
 - **Export anywhere** — CSV, clipboard, Power Query M code, Streamlit apps, standalone Python projects
 - **Query builder** — save `.dax` + `.dax.queryBuilder` artifacts, open directly in DAX Studio
 - **Workstation session** — save, list, and batch-export queries during an exploration session
@@ -99,7 +100,7 @@ Then add context files with the same connection name:
 | `Connections/my_model.yaml` | Required runtime config: MSOLAP connection string or REST dataset ID, plus description, timeouts, and row limits. |
 | `Connections/my_model_overview.md` | Optional compact overview used first by `get_connection_context`; include the most important tables, measures, filters, and example queries. |
 | `Connections/my_model.md` | Optional full model context; include detailed table notes, business definitions, caveats, relationships, and query patterns. |
-| `Connections/my_model.data_dictionary.yaml` | Optional structured dictionary used by `get_data_dictionary`, `get_schema`, `search_columns`, and `search_measures`; include tables, columns, measures, filters, descriptions, and sample values. |
+| `Connections/my_model.data_dictionary.yaml` | Optional structured dictionary used by `get_data_dictionary`, `get_schema`, `search_columns`, `search_measures`, and context detail tools; include tables, columns, measures, filters, relationships, descriptions, and sample values. |
 
 Recommended setup flow:
 
@@ -109,8 +110,10 @@ Recommended setup flow:
 4. Add or generate the `.data_dictionary.yaml` so tools can search fields and measures structurally.
 
 You can create the dictionary manually or, for MSOLAP connections, scaffold one
-from the live model with the `generate_data_dictionary` MCP tool, then fill in
-business descriptions and sample values.
+from the live model with the `generate_data_dictionary` MCP tool. The generator
+uses safe `MDSCHEMA` rowsets for tables, columns, and measures, and includes
+high-confidence relationships when optional `TMSCHEMA` rowsets are available.
+Then fill in business-specific definitions and sample values.
 
 ### 3. Wire up MCP
 
@@ -196,7 +199,7 @@ Connections/
 | `mock_contoso.yaml` | `list_connections`, query execution | Connection name, connection type, runtime settings |
 | `mock_contoso_overview.md` | `get_connection_context(..., detail="overview")` | Fast summary: tables, measures, demo queries, screenshot prompts |
 | `mock_contoso.md` | `get_connection_context(..., detail="full")` | Deeper guidance and the end-to-end demo walkthrough |
-| `mock_contoso.data_dictionary.yaml` | `get_data_dictionary`, `get_schema`, `search_columns`, `search_measures` | Searchable tables, columns, measures, filters, descriptions, and sample values |
+| `mock_contoso.data_dictionary.yaml` | `get_data_dictionary`, `get_schema`, `search_columns`, `search_measures`, context bundle/detail tools | Searchable tables, columns, measures, filters, relationships, descriptions, and sample values |
 
 Connection YAML:
 
@@ -232,6 +235,17 @@ filters:
     column: Products[Category]
     description: Filter by product category
     suggested_values: ["Bikes", "Accessories"]
+relationships:
+  - from_table: Sales
+    from_column: ProductKey
+    to_table: Products
+    to_column: ProductKey
+    cardinality: many-to-one
+    cross_filter_direction: single
+    is_active: true
+    description: Sales transactions roll up to product attributes through ProductKey
+    source: curated
+    confidence: high
 ```
 
 Good screenshot query:
@@ -314,7 +328,27 @@ filters:
     column: Calendar[FiscalYear]
     description: Filter by fiscal year
     suggested_values: ["FY25", "FY26"]
+relationships:
+  - from_table: Sales
+    from_column: DateKey
+    to_table: Calendar
+    to_column: DateKey
+    cardinality: many-to-one
+    cross_filter_direction: single
+    is_active: true
+    description: Sales rows filter through Calendar by date key
+    source: curated
+    confidence: high
 ```
+
+For agent workflows, start with `get_connection_context(detail="overview")`,
+then use `get_context_bundle(detail="overview")` for structured counts and
+relationship hints. Fetch scoped context only when needed with
+`get_table_detail`, `get_measure_detail`, `get_relationships`, and
+`get_filter_suggestions`. `check_context_staleness` compares the dictionary to
+live metadata when the transport supports it; `check_ai_readiness` highlights
+missing descriptions, ambiguous columns, undocumented relationships, and other
+context gaps.
 
 For `powerbi_rest` connections, the context layer is especially important:
 Power BI `executeQueries` supports DAX query execution, but not DMV/MDSCHEMA
@@ -334,6 +368,14 @@ paths.
 | `get_connection_context`    | Curated markdown context (tables, columns, measures) |
 | `search_connection_context` | Search context docs for specific terms               |
 | `inspect_connection`        | Live schema via safe `MDSCHEMA` rowsets              |
+| `get_context_bundle`        | Progressive structured context with counts, tables, measures, filters, and relationships |
+| `get_table_detail`          | Scoped table context plus related relationships      |
+| `get_measure_detail`        | Scoped measure context                               |
+| `get_relationships`         | Relationship topology, optionally filtered by table  |
+| `get_filter_suggestions`    | Suggested filters and allowed values from the dictionary |
+| `check_context_staleness`   | Compare dictionary names/counts against live metadata |
+| `check_ai_readiness`        | Flag missing/ambiguous context before query writing  |
+| `probe_tmschema_capabilities` | Check optional high-fidelity TMSCHEMA relationship access |
 | **Querying**                |                                                      |
 | `run_connection_query`      | Run DAX against a named connection                   |
 | `run_ad_hoc_query`          | Run DAX against a raw connection string              |
@@ -357,7 +399,9 @@ paths.
 | `export_workstation`        | Batch-export workstation as scaffold or `.dax` files |
 
 > **Admin queries are blocked.** `INFO.*()` and `$SYSTEM.DISCOVER_*` require server admin rights.
-> Use `get_connection_context` or `inspect_connection` for metadata.
+> General query execution only allows safe `MDSCHEMA` rowsets. Optional
+> `TMSCHEMA` access is isolated behind dedicated metadata tools and may be
+> unavailable depending on XMLA permissions.
 
 ### Python scaffolds
 

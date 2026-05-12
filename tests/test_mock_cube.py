@@ -84,6 +84,19 @@ class TestContosoCube:
         assert "MEASURE_NAME" in rs.fields
         assert len(rs.rows) == 5
 
+    def test_mdschema_levels_include_all_columns(self) -> None:
+        cube = ContosoCube()
+        rs = cube.execute_query("SELECT * FROM $SYSTEM.MDSCHEMA_LEVELS")
+        assert "DIMENSION_UNIQUE_NAME" in rs.fields
+        assert "DATA_TYPE" in rs.fields
+        assert len(rs.rows) == 15
+
+    def test_tmschema_relationships(self) -> None:
+        cube = ContosoCube()
+        rs = cube.execute_query("SELECT * FROM $SYSTEM.TMSCHEMA_RELATIONSHIPS")
+        assert "FromColumnID" in rs.fields
+        assert len(rs.rows) == 2
+
     def test_evaluate_sales(self) -> None:
         cube = ContosoCube()
         rs = cube.execute_query("EVALUATE Sales")

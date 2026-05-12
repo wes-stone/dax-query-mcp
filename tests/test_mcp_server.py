@@ -6,22 +6,32 @@ from fastmcp.exceptions import ToolError
 
 from dax_query_mcp.mcp_server import (
     _FOLLOWUP_MENU,
+    _NEXT_STEPS,
     _SERVER_INSTRUCTIONS,
     _workstation,
+    check_ai_readiness,
+    check_context_staleness,
     clear_workstation,
     copy_to_clipboard,
     export_to_csv,
     export_workstation,
+    followup_recommendations,
     followup_menu,
     generate_data_dictionary,
     get_connection_context,
+    get_context_bundle,
     get_data_dictionary,
+    get_filter_suggestions,
+    get_measure_detail,
     get_query_builder_schema,
+    get_relationships,
     get_schema,
+    get_table_detail,
     inspect_connection_metadata,
     inspect_model_metadata,
     list_connections,
     list_workstation,
+    probe_tmschema_capabilities,
     quick_chart,
     remove_from_workstation,
     run_connection_query,
@@ -38,6 +48,8 @@ from dax_query_mcp.mcp_server import (
 )
 
 import pytest
+
+from dax_query_mcp.followups import FOLLOWUP_ACTIONS, catalog_actions, rendered_next_steps
 
 
 @pytest.fixture(autouse=True)
@@ -912,6 +924,23 @@ def test_search_measures_expression_truncated(tmp_path) -> None:
     assert len(results[0]["expression"]) <= 104  # 100 chars + "..."
 
 
+def test_search_measures_live_fallback_without_dictionary(tmp_path) -> None:
+    """search_measures falls back to live MDSCHEMA when no dictionary exists."""
+    connections_dir = _make_contoso_connections(tmp_path)
+
+    results = json.loads(
+        search_measures(
+            connection_name="contoso",
+            search_term="SUM of",
+            connections_dir=str(connections_dir),
+        )
+    )
+
+    assert len(results) >= 2
+    assert {result["source"] for result in results} == {"live_mdschema"}
+    assert {result["name"] for result in results} >= {"Total Sales", "Total Quantity"}
+
+
 # ── get_data_dictionary tests ────────────────────────────────────────
 
 
@@ -930,6 +959,8 @@ def test_get_data_dictionary_found(tmp_path) -> None:
     assert dd["version"] == "1.0"
     assert len(dd["tables"]) == 3
     assert len(dd["measures"]) == 5
+    assert len(dd["relationships"]) == 2
+    assert dd["relationships"][0]["source"] == "curated"
 
 
 def test_get_data_dictionary_not_found(tmp_path) -> None:
@@ -976,6 +1007,13 @@ def test_get_schema_with_data_dictionary(tmp_path) -> None:
     # Filters
     assert len(payload["filters"]) == 3
 
+    # Relationships
+    assert len(payload["relationships"]) == 2
+    assert any(
+        r["from"] == "Sales[ProductKey]" and r["to"] == "Products[ProductKey]"
+        for r in payload["relationships"]
+    )
+
 
 def test_get_schema_without_data_dictionary(tmp_path) -> None:
     """get_schema returns a fallback message when no data dictionary exists."""
@@ -1007,6 +1045,61 @@ description: "REST model"
     assert payload["has_data_dictionary"] is False
     assert "REST" in payload["message"]
     assert "data dictionary" in payload["message"]
+
+
+# ── structured context layer tests ────────────────────────────────────
+
+
+def test_get_context_bundle_overview_includes_progressive_hints(tmp_path) -> None:
+    """get_context_bundle returns counts, relationships, and next context levels."""
+    connections_dir = _make_contoso_connections_with_dd(tmp_path)
+
+    payload = json.loads(
+        get_context_bundle(
+            connection_name="contoso",
+            connections_dir=str(connections_dir),
+        )
+    )
+
+    assert payload["context_level"] == "overview"
+    assert payload["counts"]["relationships"] == 2
+    assert payload["next_levels"] == ["schema", "full"]
+    assert payload["relationships"][0]["from"].startswith("Sales[")
+
+
+def test_context_detail_tools_return_scoped_dictionary_payloads(tmp_path) -> None:
+    """Scoped context tools return tables, measures, relationships, and filters."""
+    connections_dir = _make_contoso_connections_with_dd(tmp_path)
+
+    table_payload = json.loads(get_table_detail("contoso", "Sales", str(connections_dir)))
+    measure_payload = json.loads(get_measure_detail("contoso", "Total Sales", str(connections_dir)))
+    relationship_payload = json.loads(get_relationships("contoso", "Products", str(connections_dir)))
+    filter_payload = json.loads(get_filter_suggestions("contoso", "Month Filter", str(connections_dir)))
+
+    assert table_payload["found"] is True
+    assert table_payload["table"]["name"] == "Sales"
+    assert len(table_payload["relationships"]) == 2
+    assert measure_payload["measure"]["expression"] == "SUM(Sales[Amount])"
+    assert relationship_payload["relationship_count"] == 1
+    assert relationship_payload["relationships"][0]["to"] == "Products[ProductKey]"
+    assert filter_payload["filter_count"] == 1
+    assert filter_payload["filters"][0]["suggested_values"] == ["January", "February", "March"]
+
+
+def test_context_staleness_readiness_and_tmschema_probe(tmp_path) -> None:
+    """Context health tools report current mock metadata and TMSCHEMA capability."""
+    connections_dir = _make_contoso_connections_with_dd(tmp_path)
+
+    staleness = json.loads(check_context_staleness("contoso", str(connections_dir)))
+    readiness = json.loads(check_ai_readiness("contoso", str(connections_dir)))
+    capabilities = json.loads(probe_tmschema_capabilities("contoso", str(connections_dir)))
+
+    assert staleness["status"] == "current"
+    assert staleness["comparisons"]["relationships"]["checked"] is True
+    assert readiness["status"] == "ready"
+    assert readiness["score"] >= 90
+    assert capabilities["supported"] is True
+    assert capabilities["relationship_count"] == 2
 
 
 def test_inspect_connection_metadata_rest_returns_context_message(tmp_path) -> None:
@@ -1043,6 +1136,8 @@ def test_generate_data_dictionary_valid_yaml(tmp_path) -> None:
     assert "yaml_content" in payload
     assert payload["table_count"] == 3
     assert payload["measure_count"] == 5
+    assert payload["relationship_count"] == 2
+    assert payload["relationship_source"] == "tmschema"
     assert "file_path" not in payload
 
     import yaml
@@ -1072,8 +1167,11 @@ def test_generate_data_dictionary_roundtrip(tmp_path) -> None:
     dd = DataDictionary.model_validate(raw)
     assert len(dd.tables) == 3
     assert len(dd.measures) == 5
-    assert all(t.description == "" for t in dd.tables)
-    assert all(m.description == "" for m in dd.measures)
+    assert sum(len(t.columns) for t in dd.tables) == 15
+    assert any(t.description != "" for t in dd.tables)
+    assert all(m.description != "" for m in dd.measures)
+    assert len(dd.relationships) == 2
+    assert all(r.source == "tmschema" for r in dd.relationships)
 
 
 def test_generate_data_dictionary_file_write(tmp_path) -> None:
@@ -1095,6 +1193,7 @@ def test_generate_data_dictionary_file_write(tmp_path) -> None:
     dd = load_data_dictionary(out_file)
     assert len(dd.tables) == 3
     assert len(dd.measures) == 5
+    assert len(dd.relationships) == 2
 
 
 def test_generate_data_dictionary_correct_counts(tmp_path) -> None:
@@ -1108,14 +1207,17 @@ def test_generate_data_dictionary_correct_counts(tmp_path) -> None:
     )
     assert payload["table_count"] == 3
     assert payload["measure_count"] == 5
+    assert payload["relationship_count"] == 2
     import yaml
 
-    measure_names = [m["name"] for m in yaml.safe_load(payload["yaml_content"])["measures"]]
+    generated = yaml.safe_load(payload["yaml_content"])
+    measure_names = [m["name"] for m in generated["measures"]]
     assert "Total Sales" in measure_names
     assert "Total Quantity" in measure_names
     assert "Avg Price" in measure_names
     assert "Product Count" in measure_names
     assert "Day Count" in measure_names
+    assert any(t["name"] == "Sales" and len(t["columns"]) == 5 for t in generated["tables"])
 
 
 def test_generate_data_dictionary_rest_uses_existing_dictionary_message(tmp_path) -> None:
@@ -1200,6 +1302,64 @@ def test_followup_menu_actions_have_example_usage() -> None:
         assert len(action["example_usage"]) > 0
 
 
+def test_followup_catalog_is_generated_from_registry() -> None:
+    """The stable resource catalog stays in sync with the central registry."""
+    assert _FOLLOWUP_MENU == catalog_actions()
+    assert _NEXT_STEPS == rendered_next_steps()
+    assert {item["name"] for item in _FOLLOWUP_MENU} == {
+        action.name for action in FOLLOWUP_ACTIONS if action.catalog_visible
+    }
+
+
+def test_run_connection_query_renders_registry_followup_menu(monkeypatch, tmp_path) -> None:
+    """The markdown query response embeds the registry-defined numbered menu."""
+    connections_dir = tmp_path / "Connections"
+    connections_dir.mkdir()
+    (connections_dir / "sales.yaml").write_text(
+        "connection_string: 'Provider=MSOLAP.8;Data Source=localhost'\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "dax_query_mcp.mcp_server.dax_to_pandas",
+        lambda **kwargs: pd.DataFrame({"Month": ["2026-01"], "Revenue": [42]}),
+    )
+
+    result = run_connection_query(
+        connection_name="sales",
+        query='EVALUATE ROW("Revenue", 42)',
+        connections_dir=str(connections_dir),
+    )
+
+    for index, step in enumerate(rendered_next_steps(), start=1):
+        assert f"{index}. {step}" in result
+
+
+def test_followup_recommendations_use_latest_query_context(monkeypatch, tmp_path) -> None:
+    """Recommendations are ranked from the latest result shape."""
+    connections_dir = tmp_path / "Connections"
+    connections_dir.mkdir()
+    (connections_dir / "sales.yaml").write_text(
+        "connection_string: 'Provider=MSOLAP.8;Data Source=localhost'\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "dax_query_mcp.mcp_server.dax_to_pandas",
+        lambda **kwargs: pd.DataFrame({"Month": ["2026-01", "2026-02"], "Revenue": [42, 84]}),
+    )
+
+    run_connection_query(
+        connection_name="sales",
+        query='EVALUATE ROW("Revenue", 42)',
+        connections_dir=str(connections_dir),
+    )
+    payload = json.loads(followup_recommendations())
+
+    assert payload["has_query_context"] is True
+    assert payload["latest_query"]["numeric_columns"] == ["Revenue"]
+    recommended_names = [item["name"] for item in payload["recommended_actions"]]
+    assert recommended_names[:2] == ["save_to_workstation", "quick_chart"]
+
+
 # ---------------------------------------------------------------------------
 # Docstring quality tests
 # ---------------------------------------------------------------------------
@@ -1215,7 +1375,31 @@ def _get_mcp_tool_functions():
     return [(t.name, t.fn) for t in tools]
 
 
+def _get_mcp_prompt_functions():
+    """Return (name, func) pairs for every @mcp.prompt()-registered function."""
+    import asyncio
+    lp = getattr(_mcp_server, '_local_provider', None) or getattr(_mcp_server, 'local_provider', None)
+    prompts = asyncio.run(lp.list_prompts())
+    return [(p.name, p.fn) for p in prompts]
+
+
 _PLACEHOLDER_PREFIXES = ("todo", "fixme", "hack", "xxx", "placeholder")
+
+
+def test_context_workflow_prompts_are_registered() -> None:
+    """Common context and follow-up workflow prompts are available."""
+    prompts = dict(_get_mcp_prompt_functions())
+
+    assert {
+        "explore_connection",
+        "find_measure_for_metric",
+        "write_filtered_dax_query",
+        "build_period_comparison_query",
+        "export_query_results",
+    } <= set(prompts)
+    assert "get_context_bundle" in prompts["explore_connection"]("contoso")
+    assert "search_measures" in prompts["find_measure_for_metric"]("contoso", "sales")
+    assert "follow-up" in prompts["export_query_results"]("contoso", "EVALUATE Sales")
 
 
 def test_all_mcp_tools_have_docstrings() -> None:

@@ -13,6 +13,7 @@ from dax_query_mcp.data_dictionary import (
     DataDictionary,
     FilterDef,
     MeasureDef,
+    RelationshipDef,
     TableDef,
     find_data_dictionary,
     load_data_dictionary,
@@ -59,6 +60,15 @@ def sample_dict() -> DataDictionary:
                 suggested_values=["2024", "2025"],
             ),
         ],
+        relationships=[
+            RelationshipDef(
+                from_table="Sales",
+                from_column="ProductKey",
+                to_table="Products",
+                to_column="ProductKey",
+                description="Sales rows join to product attributes.",
+            ),
+        ],
     )
 
 
@@ -88,12 +98,26 @@ class TestModels:
         f = FilterDef(name="F", column="T[Col]")
         assert f.suggested_values == []
 
+    def test_relationship_defaults(self):
+        r = RelationshipDef(
+            from_table="Sales",
+            from_column="ProductKey",
+            to_table="Products",
+            to_column="ProductKey",
+        )
+        assert r.cardinality == "many-to-one"
+        assert r.cross_filter_direction == "single"
+        assert r.is_active is True
+        assert r.source == "curated"
+        assert r.confidence == "high"
+
     def test_data_dictionary_defaults(self):
         dd = DataDictionary()
         assert dd.version == "1.0"
         assert dd.tables == []
         assert dd.measures == []
         assert dd.filters == []
+        assert dd.relationships == []
 
 
 # ── YAML round-trip tests ────────────────────────────────────────────────────
@@ -118,6 +142,8 @@ class TestYAMLRoundTrip:
         assert loaded.tables[0].columns[0].sample_values == ["100.00", "250.50"]
         assert loaded.measures[0].expression == "SUM(Sales[Amount])"
         assert loaded.filters[0].suggested_values == ["2024", "2025"]
+        assert loaded.relationships[0].from_table == "Sales"
+        assert loaded.relationships[0].to_table == "Products"
 
     def test_empty_dictionary_round_trip(self, tmp_path: Path):
         dd = DataDictionary()
@@ -147,6 +173,7 @@ class TestYAMLRoundTrip:
         assert dd.tables[0].name == "Products"
         assert dd.measures[0].name == "Total Sales"
         assert dd.filters == []
+        assert dd.relationships == []
 
     def test_saved_yaml_is_valid_yaml(
         self, sample_dict: DataDictionary, tmp_path: Path
@@ -174,6 +201,7 @@ class TestSampleFile:
         assert len(dd.tables) == 3
         assert len(dd.measures) == 5
         assert len(dd.filters) == 3
+        assert len(dd.relationships) == 2
 
     def test_sample_file_round_trips(self, tmp_path: Path):
         dd = load_data_dictionary(self.SAMPLE_PATH)
@@ -195,6 +223,7 @@ class TestFindDataDictionary:
         assert isinstance(dd, DataDictionary)
         assert dd.version == "1.0"
         assert len(dd.tables) == 3
+        assert len(dd.relationships) == 2
 
     def test_returns_none_for_missing_file(self):
         dd = find_data_dictionary("nonexistent_connection", str(self.CONNECTIONS_DIR))

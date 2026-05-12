@@ -14,7 +14,16 @@ import yaml
 from fastmcp import FastMCP
 
 from .connections import load_connections, resolve_connections_dir
-from .data_dictionary import find_data_dictionary
+from .data_dictionary import (
+    ColumnDef,
+    DataDictionary,
+    MeasureDef,
+    RelationshipDef,
+    TableDef,
+    find_data_dictionary,
+    load_data_dictionary,
+    save_data_dictionary,
+)
 from .errors import (
     admin_query_blocked,
     connection_not_found,
@@ -24,6 +33,7 @@ from .errors import (
 )
 from .exceptions import DAXExecutionError
 from .executor import dax_to_pandas
+from .followups import catalog_actions, recommend_actions, rendered_next_steps
 from .formatting import DEFAULT_DATE_FORMAT, dataframe_to_markdown, preview_records
 from .models import TRANSPORT_POWERBI_REST
 from .query_builder import (
@@ -33,7 +43,6 @@ from .query_builder import (
     query_builder_to_payload,
     save_query_builder_artifacts,
 )
-from .data_dictionary import DataDictionary, load_data_dictionary, save_data_dictionary, TableDef, MeasureDef
 from .scaffold import (
     build_scaffold_connection_config,
     render_run_queries_script,
@@ -55,7 +64,6 @@ _ROWSET_COLUMNS: dict[str, list[str]] = {
 _ADMIN_QUERY_PATTERNS = re.compile(
     r"""
       \bINFO\s*\.               # INFO.*() DMV functions
-    | \$SYSTEM\.DISCOVER_       # $SYSTEM.DISCOVER_* DMV rowsets
     | \bDBCC\b                  # DBCC commands
     | \bALTER\b                 # DDL: ALTER
     | \bCREATE\b                # DDL: CREATE
@@ -64,24 +72,13 @@ _ADMIN_QUERY_PATTERNS = re.compile(
     """,
     re.IGNORECASE | re.VERBOSE,
 )
+_SYSTEM_ROWSET_PATTERN = re.compile(r"\$SYSTEM\.[A-Z0-9_]+", re.IGNORECASE)
 
 _SAFE_SYSTEM_PREFIXES = (
     "$SYSTEM.MDSCHEMA_",
 )
 
-_NEXT_STEPS = [
-    "Filter / refine — narrow to a specific account, TPID, or time range",
-    "Aggregate — total by month, by account, etc.",
-    "Save to workstation — save this query to your working session",
-    "Copy to clipboard — copy as TSV (paste into Excel) or markdown",
-    "Export as CSV — save results to a CSV file",
-    "Quick chart — generate a bar, line, or pie chart",
-    "Scaffold Power Query — generate Excel Power Query M code",
-    "Scaffold Streamlit — generate a Streamlit dashboard app",
-    "Save to DAX Studio — save as a .dax query builder file",
-    "Scaffold Python — export to a standalone Python project",
-    "Re-run last query — execute the same query again",
-]
+_NEXT_STEPS = rendered_next_steps()
 
 _SERVER_INSTRUCTIONS = """\
 You are connected to the dax-query-server, which runs DAX queries against \
@@ -143,56 +140,8 @@ mcp = FastMCP("dax-query-server", instructions=_SERVER_INSTRUCTIONS)
 
 # ── Follow-up menu resource ─────────────────────────────────────────────
 
-_FOLLOWUP_MENU: list[dict[str, Any]] = [
-    {
-        "name": "export_to_csv",
-        "description": "Export query results to a timestamped CSV file.",
-        "required_params": ["connection_name", "query", "output_dir"],
-        "example_usage": 'export_to_csv(connection_name="sales", query="EVALUATE ...", output_dir="./export")',
-    },
-    {
-        "name": "copy_to_clipboard",
-        "description": "Copy query results to the system clipboard as TSV (for Excel) or markdown.",
-        "required_params": ["connection_name", "query"],
-        "example_usage": 'copy_to_clipboard(connection_name="sales", query="EVALUATE ...", format="tsv")',
-    },
-    {
-        "name": "quick_chart",
-        "description": "Generate a chart (bar, line, or pie) from query results.",
-        "required_params": ["connection_name", "query", "chart_type", "x_column", "y_column"],
-        "example_usage": 'quick_chart(connection_name="sales", query="EVALUATE ...", chart_type="bar", x_column="Month", y_column="Revenue")',
-    },
-    {
-        "name": "scaffold_power_query",
-        "description": "Generate Excel Power Query M code to import DAX query results.",
-        "required_params": ["connection_name", "query"],
-        "example_usage": 'scaffold_power_query(connection_name="sales", query="EVALUATE ...", table_name="DAXResults")',
-    },
-    {
-        "name": "scaffold_streamlit_app",
-        "description": "Generate a Streamlit dashboard app for visualizing query results.",
-        "required_params": ["connection_name", "query"],
-        "example_usage": 'scaffold_streamlit_app(connection_name="sales", query="EVALUATE ...", title="Sales Dashboard")',
-    },
-    {
-        "name": "scaffold_python",
-        "description": "Generate a standalone Python project with run_query.py, notebook, and pyproject.toml. Uses save_query_builder under the hood.",
-        "required_params": ["output_dir", "query_text"],
-        "example_usage": 'scaffold_dax_workspace(output_dir="./my_project", query_text="EVALUATE ...", connection_name="sales")',
-    },
-    {
-        "name": "scaffold_dax_studio",
-        "description": "Save the query as .dax and .dax.queryBuilder artifacts for DAX Studio. Uses save_query_builder under the hood.",
-        "required_params": ["query_builder_json", "queries_dir"],
-        "example_usage": 'save_query_builder(query_builder_json="...", queries_dir="./queries")',
-    },
-    {
-        "name": "save_to_workstation",
-        "description": "Save the query to the session workstation for iterative exploration and later export.",
-        "required_params": ["connection_name", "query", "description"],
-        "example_usage": 'save_to_workstation(connection_name="sales", query="EVALUATE ...", description="Monthly revenue")',
-    },
-]
+_FOLLOWUP_MENU: list[dict[str, Any]] = catalog_actions()
+_last_query_context: dict[str, Any] | None = None
 
 
 @mcp.resource("followup://menu")
@@ -202,7 +151,132 @@ def followup_menu() -> str:
     Each item includes name, description, required_params, and example_usage
     so an LLM can suggest appropriate next actions to the user.
     """
-    return _to_json({"actions": _FOLLOWUP_MENU})
+    return _to_json({"actions": catalog_actions()})
+
+
+@mcp.resource("followup://recommendations")
+def followup_recommendations() -> str:
+    """Return server-ranked follow-up actions for the latest query result."""
+    return _to_json(_followup_recommendation_payload())
+
+
+@mcp.prompt
+def explore_connection(connection_name: str = "your_connection") -> str:
+    """Guide an agent through progressive discovery for a new DAX connection."""
+    return (
+        f"Explore the `{connection_name}` semantic model progressively. "
+        "First call get_connection_context(detail='overview'), then use "
+        "get_context_bundle(detail='overview') for structured counts. Only fetch "
+        "get_table_detail, get_measure_detail, get_relationships, or "
+        "get_filter_suggestions when the question needs that scoped context. "
+        "After writing DAX, run it with run_connection_query in the same turn and "
+        "return the complete tool response verbatim."
+    )
+
+
+@mcp.prompt
+def find_measure_for_metric(connection_name: str = "your_connection", metric: str = "revenue") -> str:
+    """Guide measure discovery before writing a metric-focused DAX query."""
+    return (
+        f"Find the best DAX measure for `{metric}` in `{connection_name}`. "
+        "Call search_measures with the metric term, then get_measure_detail for "
+        "the most likely measure. If ambiguity remains, inspect related tables "
+        "with get_context_bundle(detail='schema') or get_table_detail before "
+        "running a DAX query."
+    )
+
+
+@mcp.prompt
+def write_filtered_dax_query(
+    connection_name: str = "your_connection",
+    business_question: str = "show the metric by month",
+    filters: str = "",
+) -> str:
+    """Guide filtered DAX query authoring with context and execution steps."""
+    return (
+        f"Answer this question against `{connection_name}`: {business_question}. "
+        f"Requested filters: {filters or 'none specified'}. Start with "
+        "get_connection_context(detail='overview'), then use search_columns, "
+        "search_measures, and get_filter_suggestions to resolve exact names. "
+        "Write a safe EVALUATE query, execute it with run_connection_query in "
+        "the same turn, and output the complete returned markdown verbatim."
+    )
+
+
+@mcp.prompt
+def build_period_comparison_query(
+    connection_name: str = "your_connection",
+    metric: str = "Total Sales",
+    period: str = "month",
+) -> str:
+    """Guide a period comparison or time-intelligence DAX workflow."""
+    return (
+        f"Build a `{period}` comparison for `{metric}` on `{connection_name}`. "
+        "Use search_measures to confirm the metric, search_columns for calendar "
+        "fields, and get_relationships to verify the fact table filters through "
+        "the calendar table. Then execute the DAX with run_connection_query and "
+        "preserve the returned follow-up menu."
+    )
+
+
+@mcp.prompt
+def export_query_results(connection_name: str = "your_connection", query: str = "EVALUATE ...") -> str:
+    """Guide an end-to-end query-to-artifact follow-up workflow."""
+    return (
+        f"Run this query on `{connection_name}` and turn it into a reusable "
+        f"artifact: {query}. First execute run_connection_query and output the "
+        "complete response. Then use the server-authored follow-up options: "
+        "save_to_workstation for iterative work, quick_chart when numeric columns "
+        "are present, export_to_csv for a file, or scaffold_power_query/"
+        "scaffold_streamlit_app/scaffold_dax_workspace when the user wants a "
+        "refreshable asset."
+    )
+
+
+def _followup_recommendation_payload() -> dict[str, Any]:
+    """Return the latest query context plus ranked follow-up actions."""
+    if _last_query_context is None:
+        return {
+            "has_query_context": False,
+            "message": "No query has been run in this server session yet.",
+            "recommended_actions": [],
+        }
+
+    return {
+        "has_query_context": True,
+        "latest_query": _last_query_context,
+        "recommended_actions": recommend_actions(_last_query_context),
+    }
+
+
+def _capture_last_query_context(
+    *,
+    connection_name: str | None,
+    query: str,
+    summary: dict[str, Any],
+    dataframe: pd.DataFrame,
+    profile: dict[str, Any] | None = None,
+) -> None:
+    """Capture result metadata used by server-authored follow-up recommendations."""
+    global _last_query_context
+    _last_query_context = {
+        "connection_name": connection_name,
+        "query": query,
+        "row_count": summary["row_count"],
+        "column_count": summary.get("column_count", len(summary.get("columns", []))),
+        "columns": list(summary.get("columns", [])),
+        "numeric_columns": _numeric_columns(dataframe),
+        "profile": profile or {},
+        "workstation_count": len(_workstation),
+    }
+
+
+def _numeric_columns(dataframe: pd.DataFrame) -> list[str]:
+    return [
+        str(column)
+        for column in dataframe.columns
+        if pd.api.types.is_numeric_dtype(dataframe[column])
+    ]
 
 
 def validate_dax_query(query: str) -> None:
@@ -212,9 +286,9 @@ def validate_dax_query(query: str) -> None:
     Raises ToolError with a structured JSON payload so the LLM can self-correct.
     """
     upper = query.strip().upper()
-    for prefix in _SAFE_SYSTEM_PREFIXES:
-        if prefix.upper() in upper:
-            return
+    for rowset_ref in _SYSTEM_ROWSET_PATTERN.findall(upper):
+        if not any(rowset_ref.startswith(prefix) for prefix in _SAFE_SYSTEM_PREFIXES):
+            raise admin_query_blocked(blocked_pattern=rowset_ref)
 
     match = _ADMIN_QUERY_PATTERNS.search(query)
     if match:
@@ -493,6 +567,10 @@ def get_schema(
             }
             for f in dd.filters
         ]
+        payload["relationships"] = [
+            _relationship_payload(relationship)
+            for relationship in dd.relationships
+        ]
     else:
         if connection.transport == TRANSPORT_POWERBI_REST:
             payload["message"] = (
@@ -507,6 +585,359 @@ def get_schema(
             )
 
     return _to_json(payload)
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+def get_context_bundle(
+    connection_name: str,
+    detail: str = "overview",
+    connections_dir: str = DEFAULT_CONNECTIONS_DIR,
+    table_names: str = "",
+) -> str:
+    """Return a progressive, structured context bundle for a connection.
+
+    detail="overview" returns compact counts and key names; "schema" returns
+    structured tables, measures, filters, and relationships; "full" also
+    includes available markdown context. Use table_names as a comma-separated
+    allowlist to scope table-heavy schema output.
+    """
+    return _to_json(
+        _context_bundle_payload(
+            connection_name=connection_name,
+            detail=detail,
+            connections_dir=connections_dir,
+            table_names=_split_csv(table_names),
+        )
+    )
+
+
+@mcp.resource("context://{connection_name}/schema")
+def connection_schema_resource(connection_name: str) -> str:
+    """Return schema-level structured context for a connection."""
+    return _to_json(
+        _context_bundle_payload(
+            connection_name=connection_name,
+            detail="schema",
+            connections_dir=DEFAULT_CONNECTIONS_DIR,
+            table_names=[],
+        )
+    )
+
+
+@mcp.resource("context://{connection_name}/relationships")
+def connection_relationships_resource(connection_name: str) -> str:
+    """Return relationship topology from the connection data dictionary."""
+    dd = find_data_dictionary(connection_name, DEFAULT_CONNECTIONS_DIR)
+    relationships = [_relationship_payload(item) for item in dd.relationships] if dd is not None else []
+    return _to_json({
+        "connection_name": connection_name,
+        "found": dd is not None,
+        "relationship_count": len(relationships),
+        "relationships": relationships,
+    })
+
+
+@mcp.resource("context://{connection_name}/data-dictionary")
+def connection_data_dictionary_resource(connection_name: str) -> str:
+    """Return the structured data dictionary resource for a connection."""
+    return get_data_dictionary(connection_name, DEFAULT_CONNECTIONS_DIR)
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+def get_table_detail(
+    connection_name: str,
+    table_name: str,
+    connections_dir: str = DEFAULT_CONNECTIONS_DIR,
+) -> str:
+    """Return detailed structured context for a single table."""
+    dd = find_data_dictionary(connection_name, connections_dir)
+    if dd is None:
+        return _to_json({
+            "connection_name": connection_name,
+            "found": False,
+            "message": "No data dictionary found for this connection.",
+        })
+
+    table = _find_table(dd, table_name)
+    if table is None:
+        raise invalid_params(
+            message=f"Table '{table_name}' not found in data dictionary.",
+            suggestion="Call get_schema or search_columns to discover available tables.",
+            parameter="table_name",
+        )
+
+    relationships = [
+        _relationship_payload(item)
+        for item in dd.relationships
+        if item.from_table == table.name or item.to_table == table.name
+    ]
+    return _to_json({
+        "connection_name": connection_name,
+        "found": True,
+        "table": table.model_dump(),
+        "relationships": relationships,
+    })
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+def get_measure_detail(
+    connection_name: str,
+    measure_name: str,
+    connections_dir: str = DEFAULT_CONNECTIONS_DIR,
+) -> str:
+    """Return detailed structured context for a single measure."""
+    dd = find_data_dictionary(connection_name, connections_dir)
+    if dd is None:
+        return _to_json({
+            "connection_name": connection_name,
+            "found": False,
+            "message": "No data dictionary found for this connection.",
+        })
+
+    measure = _find_measure(dd, measure_name)
+    if measure is None:
+        raise invalid_params(
+            message=f"Measure '{measure_name}' not found in data dictionary.",
+            suggestion="Call search_measures to discover available measures.",
+            parameter="measure_name",
+        )
+    return _to_json({
+        "connection_name": connection_name,
+        "found": True,
+        "measure": measure.model_dump(),
+    })
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+def get_relationships(
+    connection_name: str,
+    table_name: str = "",
+    connections_dir: str = DEFAULT_CONNECTIONS_DIR,
+) -> str:
+    """Return relationship topology, optionally filtered to one table."""
+    dd = find_data_dictionary(connection_name, connections_dir)
+    if dd is None:
+        return _to_json({
+            "connection_name": connection_name,
+            "found": False,
+            "relationship_count": 0,
+            "relationships": [],
+            "message": "No data dictionary found for this connection.",
+        })
+
+    relationships = dd.relationships
+    if table_name.strip():
+        table = _find_table(dd, table_name)
+        if table is None:
+            raise invalid_params(
+                message=f"Table '{table_name}' not found in data dictionary.",
+                suggestion="Call get_schema to discover available tables.",
+                parameter="table_name",
+            )
+        relationships = [
+            item for item in relationships
+            if item.from_table == table.name or item.to_table == table.name
+        ]
+
+    return _to_json({
+        "connection_name": connection_name,
+        "found": True,
+        "relationship_count": len(relationships),
+        "relationships": [_relationship_payload(item) for item in relationships],
+    })
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+def get_filter_suggestions(
+    connection_name: str,
+    filter_name: str = "",
+    connections_dir: str = DEFAULT_CONNECTIONS_DIR,
+) -> str:
+    """Return suggested filters and values from the data dictionary."""
+    dd = find_data_dictionary(connection_name, connections_dir)
+    if dd is None:
+        return _to_json({
+            "connection_name": connection_name,
+            "found": False,
+            "filters": [],
+            "message": "No data dictionary found for this connection.",
+        })
+
+    filters = dd.filters
+    if filter_name.strip():
+        term = filter_name.lower()
+        filters = [
+            item for item in filters
+            if item.name.lower() == term or item.column.lower() == term
+        ]
+
+    return _to_json({
+        "connection_name": connection_name,
+        "found": True,
+        "filter_count": len(filters),
+        "filters": [item.model_dump() for item in filters],
+    })
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+def check_context_staleness(
+    connection_name: str,
+    connections_dir: str = DEFAULT_CONNECTIONS_DIR,
+    command_timeout_seconds: int | None = None,
+) -> str:
+    """Compare live model metadata against the data dictionary for drift."""
+    connection = _get_connection(connection_name, connections_dir)
+    dd = find_data_dictionary(connection_name, connections_dir)
+    payload: dict[str, Any] = {
+        "connection_name": connection_name,
+        "has_data_dictionary": dd is not None,
+        "live_metadata_supported": connection.transport != TRANSPORT_POWERBI_REST,
+    }
+    if dd is None:
+        payload["status"] = "missing_data_dictionary"
+        payload["message"] = "Create or generate a data dictionary before checking staleness."
+        return _to_json(payload)
+    if connection.transport == TRANSPORT_POWERBI_REST:
+        payload["status"] = "not_checked"
+        payload["message"] = (
+            "Power BI REST executeQueries cannot inspect live MDSCHEMA metadata. "
+            "Use an MSOLAP connection to the same model for live staleness checks."
+        )
+        payload["dictionary"] = _dictionary_metadata(dd)
+        return _to_json(payload)
+
+    live = _live_mdschema_metadata(connection, command_timeout_seconds=command_timeout_seconds)
+    dictionary = _dictionary_metadata(dd)
+    comparisons = {
+        key: _compare_name_sets(dictionary[key], live[key])
+        for key in ("tables", "columns", "measures")
+    }
+
+    relationship_probe = _load_tmschema_relationships(connection)
+    if relationship_probe["supported"]:
+        live_relationships = {
+            _relationship_key(RelationshipDef.model_validate(item))
+            for item in relationship_probe["relationships"]
+        }
+        comparisons["relationships"] = _compare_name_sets(dictionary["relationships"], live_relationships)
+    else:
+        comparisons["relationships"] = {
+            "checked": False,
+            "reason": relationship_probe["message"],
+            "missing_in_dictionary": [],
+            "missing_in_live": [],
+        }
+
+    stale = any(
+        comparison.get("missing_in_dictionary") or comparison.get("missing_in_live")
+        for comparison in comparisons.values()
+        if comparison.get("checked", True)
+    )
+    payload.update({
+        "status": "stale" if stale else "current",
+        "dictionary": dictionary,
+        "live": live,
+        "comparisons": comparisons,
+    })
+    return _to_json(payload)
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+def check_ai_readiness(
+    connection_name: str,
+    connections_dir: str = DEFAULT_CONNECTIONS_DIR,
+) -> str:
+    """Assess whether context is descriptive enough for reliable DAX generation."""
+    dd = find_data_dictionary(connection_name, connections_dir)
+    if dd is None:
+        return _to_json({
+            "connection_name": connection_name,
+            "status": "not_ready",
+            "score": 0,
+            "issues": [{"category": "data_dictionary", "message": "No data dictionary found."}],
+        })
+
+    issues: list[dict[str, str]] = []
+    duplicate_columns = _duplicate_column_names(dd)
+    for name, tables in duplicate_columns.items():
+        issues.append({
+            "category": "ambiguous_column",
+            "message": f"Column '{name}' appears in multiple tables: {', '.join(tables)}.",
+        })
+    for table in dd.tables:
+        if not table.description.strip():
+            issues.append({"category": "table_description", "message": f"Table '{table.name}' has no description."})
+        for column in table.columns:
+            if not column.description.strip():
+                issues.append({
+                    "category": "column_description",
+                    "message": f"Column '{table.name}[{column.name}]' has no description.",
+                })
+    for measure in dd.measures:
+        if not measure.expression.strip():
+            issues.append({"category": "measure_expression", "message": f"Measure '{measure.name}' has no expression."})
+        if not measure.description.strip():
+            issues.append({"category": "measure_description", "message": f"Measure '{measure.name}' has no description."})
+    for filter_def in dd.filters:
+        if not filter_def.suggested_values:
+            issues.append({
+                "category": "filter_values",
+                "message": f"Filter '{filter_def.name}' has no suggested values.",
+            })
+    if not dd.relationships:
+        issues.append({
+            "category": "relationships",
+            "message": "No relationships are documented; joins/filter propagation may be ambiguous.",
+        })
+    else:
+        for relationship in dd.relationships:
+            if not relationship.description.strip():
+                issues.append({
+                    "category": "relationship_description",
+                    "message": (
+                        f"Relationship {relationship.from_table}[{relationship.from_column}] -> "
+                        f"{relationship.to_table}[{relationship.to_column}] has no description."
+                    ),
+                })
+
+    score = max(0, 100 - (len(issues) * 5))
+    if score >= 90:
+        status = "ready"
+    elif score >= 70:
+        status = "usable_with_warnings"
+    else:
+        status = "needs_context"
+    return _to_json({
+        "connection_name": connection_name,
+        "status": status,
+        "score": score,
+        "issue_count": len(issues),
+        "issues": issues,
+    })
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+def probe_tmschema_capabilities(
+    connection_name: str,
+    connections_dir: str = DEFAULT_CONNECTIONS_DIR,
+) -> str:
+    """Probe optional TMSCHEMA metadata access without requiring it."""
+    connection = _get_connection(connection_name, connections_dir)
+    if connection.transport == TRANSPORT_POWERBI_REST:
+        return _to_json({
+            "connection_name": connection_name,
+            "supported": False,
+            "message": "Power BI REST executeQueries does not expose TMSCHEMA rowsets.",
+        })
+
+    probe = _load_tmschema_relationships(connection)
+    return _to_json({
+        "connection_name": connection_name,
+        "supported": probe["supported"],
+        "message": probe["message"],
+        "relationship_count": len(probe["relationships"]),
+        "relationships": probe["relationships"],
+    })
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
@@ -540,6 +971,13 @@ def run_connection_query(
         raise execution_failed(query, exc) from exc
 
     summary = summarize_dataframe(dataframe, preview_rows=preview_rows)
+    _capture_last_query_context(
+        connection_name=connection_name,
+        query=query,
+        summary=summary,
+        dataframe=dataframe,
+        profile=dataframe.attrs.get("profiling") if profile else None,
+    )
     md = _build_query_response_markdown(
         title=f"Query preview for `{connection_name}`",
         summary=summary,
@@ -739,6 +1177,13 @@ def run_named_query(
         )
 
     summary = summarize_dataframe(dataframe, preview_rows=preview_rows)
+    query_config = pipeline.queries.get(query_name)
+    _capture_last_query_context(
+        connection_name=None,
+        query=query_config.dax_query if query_config is not None else query_name,
+        summary=summary,
+        dataframe=dataframe,
+    )
     return _build_query_response_markdown(
         title=f"Query preview for `{query_name}`",
         summary=summary,
@@ -776,6 +1221,13 @@ def run_ad_hoc_query(
         raise execution_failed(query, exc) from exc
 
     summary = summarize_dataframe(dataframe, preview_rows=preview_rows)
+    _capture_last_query_context(
+        connection_name=None,
+        query=query,
+        summary=summary,
+        dataframe=dataframe,
+        profile=dataframe.attrs.get("profiling") if profile else None,
+    )
     md = _build_query_response_markdown(
         title="Query preview",
         summary=summary,
@@ -903,7 +1355,7 @@ def search_columns(
                         "description": description,
                     })
                     seen.add((table_name, col_name))
-    except Exception:
+    except DAXExecutionError:
         pass
 
     # Sort by relevance: exact > starts-with > contains
@@ -939,7 +1391,7 @@ def search_measures(
     Use this when the user asks "which measure calculates revenue?" or similar
     discovery questions.
     """
-    _get_connection(connection_name, connections_dir)
+    connection = _get_connection(connection_name, connections_dir)
 
     dd: DataDictionary | None = None
     dd_path = Path(resolve_connections_dir(connections_dir)) / f"{connection_name}.data_dictionary.yaml"
@@ -947,6 +1399,7 @@ def search_measures(
         dd = load_data_dictionary(dd_path)
 
     matches: list[dict[str, Any]] = []
+    seen: set[str] = set()
     term_lower = search_term.lower()
 
     if dd is not None:
@@ -960,7 +1413,39 @@ def search_measures(
                     "name": measure.name,
                     "expression": expression[:100] + ("..." if len(expression) > 100 else ""),
                     "description": measure.description or "",
+                    "source": "data_dictionary",
                 })
+                seen.add(measure.name)
+
+    try:
+        if connection.transport != TRANSPORT_POWERBI_REST:
+            dataframe = _execute_connection_dataframe(
+                connection,
+                (
+                    "SELECT MEASURE_NAME, MEASURE_UNIQUE_NAME, DESCRIPTION "
+                    "FROM $SYSTEM.MDSCHEMA_MEASURES"
+                ),
+            )
+            for _, row in dataframe.iterrows():
+                measure_name = str(row.get("MEASURE_NAME", "") or "")
+                if not measure_name or measure_name in seen:
+                    continue
+
+                expression = str(row.get("MEASURE_UNIQUE_NAME", "") or "")
+                description = str(row.get("DESCRIPTION", "") or "")
+                name_lower = measure_name.lower()
+                expr_lower = expression.lower()
+                desc_lower = description.lower()
+                if term_lower in name_lower or term_lower in desc_lower or term_lower in expr_lower:
+                    matches.append({
+                        "name": measure_name,
+                        "expression": expression[:100] + ("..." if len(expression) > 100 else ""),
+                        "description": description,
+                        "source": "live_mdschema",
+                    })
+                    seen.add(measure_name)
+    except DAXExecutionError:
+        pass
 
     def _relevance(m: dict[str, Any]) -> tuple[int, str]:
         name_lower = m["name"].lower()
@@ -972,6 +1457,386 @@ def search_measures(
 
     matches.sort(key=_relevance)
     return _to_json(matches[:max_results])
+
+
+def _split_csv(value: str) -> list[str]:
+    return [part.strip() for part in value.split(",") if part.strip()]
+
+
+def _relationship_payload(relationship: RelationshipDef) -> dict[str, Any]:
+    payload = relationship.model_dump()
+    payload["from"] = f"{relationship.from_table}[{relationship.from_column}]"
+    payload["to"] = f"{relationship.to_table}[{relationship.to_column}]"
+    return payload
+
+
+def _relationship_key(relationship: RelationshipDef) -> str:
+    return (
+        f"{relationship.from_table}[{relationship.from_column}]"
+        f"->{relationship.to_table}[{relationship.to_column}]"
+    )
+
+
+def _context_bundle_payload(
+    *,
+    connection_name: str,
+    detail: str,
+    connections_dir: str,
+    table_names: list[str],
+) -> dict[str, Any]:
+    normalized_detail = detail.lower()
+    if normalized_detail not in {"overview", "schema", "full"}:
+        raise invalid_params(
+            message=f"Unsupported detail '{detail}'.",
+            suggestion='Use detail="overview", "schema", or "full".',
+            parameter="detail",
+        )
+
+    connection = _get_connection(connection_name, connections_dir)
+    dd = find_data_dictionary(connection_name, connections_dir)
+    payload: dict[str, Any] = {
+        "connection_name": connection_name,
+        "description": connection.description,
+        "context_level": normalized_detail,
+        "has_data_dictionary": dd is not None,
+        "sources": {
+            "overview_markdown": connection.overview_path,
+            "full_context_markdown": connection.context_path,
+            "data_dictionary": str(Path(resolve_connections_dir(connections_dir)) / f"{connection_name}.data_dictionary.yaml")
+            if dd is not None
+            else None,
+        },
+        "next_levels": _next_context_levels(normalized_detail),
+    }
+    if dd is None:
+        payload["message"] = "No data dictionary found; use get_connection_context or generate_data_dictionary next."
+        return payload
+
+    table_filter = {name.lower() for name in table_names}
+    tables = [table for table in dd.tables if not table_filter or table.name.lower() in table_filter]
+    payload["counts"] = {
+        "tables": len(dd.tables),
+        "measures": len(dd.measures),
+        "filters": len(dd.filters),
+        "relationships": len(dd.relationships),
+    }
+
+    if normalized_detail == "overview":
+        payload["tables"] = [
+            {"name": table.name, "description": table.description, "column_count": len(table.columns)}
+            for table in tables
+        ]
+        payload["measures"] = [
+            {"name": measure.name, "description": measure.description}
+            for measure in dd.measures
+        ]
+        payload["filters"] = [
+            {"name": filter_def.name, "column": filter_def.column, "description": filter_def.description}
+            for filter_def in dd.filters
+        ]
+        payload["relationships"] = [_relationship_payload(item) for item in dd.relationships]
+        return payload
+
+    payload["tables"] = [table.model_dump() for table in tables]
+    payload["measures"] = [measure.model_dump() for measure in dd.measures]
+    payload["filters"] = [filter_def.model_dump() for filter_def in dd.filters]
+    payload["relationships"] = [_relationship_payload(item) for item in dd.relationships]
+    if normalized_detail == "full":
+        payload["overview_markdown"] = connection.overview_markdown or ""
+        payload["context_markdown"] = connection.context_markdown or ""
+    return payload
+
+
+def _next_context_levels(detail: str) -> list[str]:
+    if detail == "overview":
+        return ["schema", "full"]
+    if detail == "schema":
+        return ["full"]
+    return []
+
+
+def _find_table(dd: DataDictionary, table_name: str) -> TableDef | None:
+    term = table_name.lower()
+    return next((table for table in dd.tables if table.name.lower() == term), None)
+
+
+def _find_measure(dd: DataDictionary, measure_name: str) -> MeasureDef | None:
+    term = measure_name.lower()
+    return next((measure for measure in dd.measures if measure.name.lower() == term), None)
+
+
+def _dictionary_metadata(dd: DataDictionary) -> dict[str, list[str]]:
+    return {
+        "tables": sorted(table.name for table in dd.tables),
+        "columns": sorted(
+            f"{table.name}[{column.name}]"
+            for table in dd.tables
+            for column in table.columns
+        ),
+        "measures": sorted(measure.name for measure in dd.measures),
+        "relationships": sorted(_relationship_key(item) for item in dd.relationships),
+    }
+
+
+def _live_mdschema_metadata(
+    connection: Any,
+    *,
+    command_timeout_seconds: int | None,
+) -> dict[str, list[str]]:
+    queries = {
+        "dimensions": "SELECT * FROM $SYSTEM.MDSCHEMA_DIMENSIONS",
+        "levels": "SELECT * FROM $SYSTEM.MDSCHEMA_LEVELS",
+        "measures": "SELECT * FROM $SYSTEM.MDSCHEMA_MEASURES",
+    }
+    raw: dict[str, pd.DataFrame] = {}
+    for key, query in queries.items():
+        try:
+            raw[key] = _execute_connection_dataframe(
+                connection,
+                query,
+                command_timeout_seconds=command_timeout_seconds,
+            )
+        except DAXExecutionError as exc:
+            raise execution_failed(query, exc) from exc
+    return {
+        "tables": sorted(_table_names_from_dimensions(raw["dimensions"])),
+        "columns": sorted(
+            f"{table_name}[{column.name}]"
+            for table_name, column in _columns_from_levels(raw["levels"])
+        ),
+        "measures": sorted(
+            str(row.get("MEASURE_NAME", "") or "")
+            for _, row in raw["measures"].iterrows()
+            if str(row.get("MEASURE_NAME", "") or "").strip()
+        ),
+    }
+
+
+def _table_names_from_dimensions(dataframe: pd.DataFrame) -> set[str]:
+    if "DIMENSION_NAME" not in dataframe.columns:
+        return set()
+    return {
+        str(value)
+        for value in dataframe["DIMENSION_NAME"].dropna().unique()
+        if str(value).strip()
+    }
+
+
+def _columns_from_levels(dataframe: pd.DataFrame) -> list[tuple[str, ColumnDef]]:
+    columns: list[tuple[str, ColumnDef]] = []
+    for _, row in dataframe.iterrows():
+        column_name = str(row.get("LEVEL_NAME", "") or "").strip()
+        if not column_name or column_name.lower() in {"(all)", "all"}:
+            continue
+        table_name = _table_name_from_level_row(row)
+        if not table_name:
+            continue
+        data_type = _mdschema_level_data_type(row)
+        columns.append((
+            table_name,
+            ColumnDef(
+                name=column_name,
+                data_type=data_type,
+                description=str(row.get("DESCRIPTION", "") or ""),
+            ),
+        ))
+    return columns
+
+
+def _table_name_from_level_row(row: Any) -> str:
+    value = str(row.get("DIMENSION_UNIQUE_NAME", "") or "").strip()
+    if value:
+        return _clean_mdx_name(value)
+    hierarchy = str(row.get("HIERARCHY_UNIQUE_NAME", "") or "").strip()
+    if hierarchy:
+        first_part = hierarchy.split(".", maxsplit=1)[0]
+        return _clean_mdx_name(first_part)
+    return ""
+
+
+def _clean_mdx_name(value: str) -> str:
+    text = value.strip()
+    if text.startswith("[") and "]" in text:
+        text = text[1:text.index("]")]
+    return text.strip("[]")
+
+
+def _mdschema_level_data_type(row: Any) -> str:
+    for key in ("DATA_TYPE", "LEVEL_DBTYPE", "LEVEL_TYPE"):
+        value = row.get(key, None)
+        if value is not None and str(value).strip() and str(value) != "nan":
+            return str(value)
+    return "string"
+
+
+def _compare_name_sets(dictionary_values: Any, live_values: Any) -> dict[str, Any]:
+    dictionary_set = {str(value) for value in dictionary_values}
+    live_set = {str(value) for value in live_values}
+    return {
+        "checked": True,
+        "dictionary_count": len(dictionary_set),
+        "live_count": len(live_set),
+        "missing_in_dictionary": sorted(live_set - dictionary_set),
+        "missing_in_live": sorted(dictionary_set - live_set),
+    }
+
+
+def _duplicate_column_names(dd: DataDictionary) -> dict[str, list[str]]:
+    locations: dict[str, list[str]] = {}
+    display_names: dict[str, str] = {}
+    for table in dd.tables:
+        for column in table.columns:
+            key = column.name.lower()
+            display_names.setdefault(key, column.name)
+            locations.setdefault(key, []).append(table.name)
+    return {
+        display_names[key]: sorted(set(tables))
+        for key, tables in locations.items()
+        if len(set(tables)) > 1
+    }
+
+
+def _load_tmschema_relationships(connection: Any) -> dict[str, Any]:
+    try:
+        relationships_df = _execute_connection_dataframe(
+            connection,
+            "SELECT * FROM $SYSTEM.TMSCHEMA_RELATIONSHIPS",
+        )
+    except DAXExecutionError as exc:
+        return {
+            "supported": False,
+            "message": f"TMSCHEMA relationship metadata unavailable: {exc}",
+            "relationships": [],
+        }
+
+    try:
+        tables_df = _execute_connection_dataframe(connection, "SELECT * FROM $SYSTEM.TMSCHEMA_TABLES")
+        columns_df = _execute_connection_dataframe(connection, "SELECT * FROM $SYSTEM.TMSCHEMA_COLUMNS")
+    except DAXExecutionError:
+        tables_df = pd.DataFrame()
+        columns_df = pd.DataFrame()
+
+    relationships = _relationships_from_tmschema(relationships_df, tables_df, columns_df)
+    message = (
+        "TMSCHEMA relationship metadata is available."
+        if relationships
+        else "TMSCHEMA_RELATIONSHIPS returned no usable relationship rows."
+    )
+    return {
+        "supported": True,
+        "message": message,
+        "relationships": [relationship.model_dump() for relationship in relationships],
+    }
+
+
+def _relationships_from_tmschema(
+    relationships_df: pd.DataFrame,
+    tables_df: pd.DataFrame,
+    columns_df: pd.DataFrame,
+) -> list[RelationshipDef]:
+    table_names = _tmschema_table_name_map(tables_df)
+    column_lookup = _tmschema_column_lookup(columns_df, table_names)
+    relationships: list[RelationshipDef] = []
+    for _, row in relationships_df.iterrows():
+        from_column_info = column_lookup.get(str(_first_existing(row, ("FromColumnID", "FROM_COLUMN_ID"))))
+        to_column_info = column_lookup.get(str(_first_existing(row, ("ToColumnID", "TO_COLUMN_ID"))))
+        from_table = str(_first_existing(row, ("FromTable", "FromTableName", "FROM_TABLE", "FROM_TABLE_NAME")) or "")
+        from_column = str(_first_existing(row, ("FromColumn", "FromColumnName", "FROM_COLUMN", "FROM_COLUMN_NAME")) or "")
+        to_table = str(_first_existing(row, ("ToTable", "ToTableName", "TO_TABLE", "TO_TABLE_NAME")) or "")
+        to_column = str(_first_existing(row, ("ToColumn", "ToColumnName", "TO_COLUMN", "TO_COLUMN_NAME")) or "")
+
+        if from_column_info is not None:
+            from_table = from_table or from_column_info["table"]
+            from_column = from_column or from_column_info["column"]
+        if to_column_info is not None:
+            to_table = to_table or to_column_info["table"]
+            to_column = to_column or to_column_info["column"]
+
+        from_table_id = _first_existing(row, ("FromTableID", "FROM_TABLE_ID"))
+        to_table_id = _first_existing(row, ("ToTableID", "TO_TABLE_ID"))
+        from_table = from_table or table_names.get(str(from_table_id), "")
+        to_table = to_table or table_names.get(str(to_table_id), "")
+
+        if not all((from_table, from_column, to_table, to_column)):
+            continue
+        relationships.append(
+            RelationshipDef(
+                from_table=from_table,
+                from_column=from_column,
+                to_table=to_table,
+                to_column=to_column,
+                cardinality=_cardinality_from_tmschema(row),
+                cross_filter_direction=_cross_filter_from_tmschema(row),
+                is_active=_coerce_bool(_first_existing(row, ("IsActive", "IS_ACTIVE")), default=True),
+                description=str(_first_existing(row, ("Description", "DESCRIPTION")) or ""),
+                source="tmschema",
+                confidence="high",
+            )
+        )
+    return relationships
+
+
+def _tmschema_table_name_map(dataframe: pd.DataFrame) -> dict[str, str]:
+    if dataframe.empty or "ID" not in dataframe.columns:
+        return {}
+    return {
+        str(row.get("ID")): str(_first_existing(row, ("Name", "ExplicitName", "InferredName")) or "")
+        for _, row in dataframe.iterrows()
+    }
+
+
+def _tmschema_column_lookup(dataframe: pd.DataFrame, table_names: dict[str, str]) -> dict[str, dict[str, str]]:
+    if dataframe.empty or "ID" not in dataframe.columns:
+        return {}
+    lookup: dict[str, dict[str, str]] = {}
+    for _, row in dataframe.iterrows():
+        column_id = str(row.get("ID"))
+        table_id = str(_first_existing(row, ("TableID", "TABLE_ID")) or "")
+        column_name = str(_first_existing(row, ("ExplicitName", "InferredName", "Name")) or "")
+        if column_id and column_name:
+            lookup[column_id] = {"table": table_names.get(table_id, ""), "column": column_name}
+    return lookup
+
+
+def _first_existing(row: Any, names: tuple[str, ...]) -> Any:
+    for name in names:
+        if name in row:
+            value = row.get(name)
+            if value is not None and not pd.isna(value) and str(value).strip():
+                return value
+    return None
+
+
+def _coerce_bool(value: Any, *, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"true", "1", "yes", "active"}:
+        return True
+    if text in {"false", "0", "no", "inactive"}:
+        return False
+    return default
+
+
+def _cardinality_from_tmschema(row: Any) -> str:
+    from_cardinality = str(_first_existing(row, ("FromCardinality", "FROM_CARDINALITY")) or "").lower()
+    to_cardinality = str(_first_existing(row, ("ToCardinality", "TO_CARDINALITY")) or "").lower()
+    if "many" in from_cardinality and "one" in to_cardinality:
+        return "many-to-one"
+    if "one" in from_cardinality and "many" in to_cardinality:
+        return "one-to-many"
+    if "one" in from_cardinality and "one" in to_cardinality:
+        return "one-to-one"
+    if "many" in from_cardinality and "many" in to_cardinality:
+        return "many-to-many"
+    return "many-to-one"
+
+
+def _cross_filter_from_tmschema(row: Any) -> str:
+    value = str(_first_existing(row, ("CrossFilteringBehavior", "CROSS_FILTERING_BEHAVIOR")) or "").lower()
+    return "both" if "both" in value else "single"
 
 
 def summarize_dataframe(
@@ -1387,9 +2252,10 @@ def generate_data_dictionary(
 ) -> str:
     """Generate a data dictionary YAML from live schema inspection.
 
-    Queries MDSCHEMA_MEASUREGROUPS, MDSCHEMA_MEASURES, and
-    MDSCHEMA_DIMENSIONS to discover tables and measures, then builds a
-    DataDictionary scaffold with empty descriptions for the user to fill in.
+    Queries MDSCHEMA_MEASUREGROUPS, MDSCHEMA_MEASURES, MDSCHEMA_DIMENSIONS,
+    and MDSCHEMA_LEVELS to discover tables, columns, and measures, then builds
+    a DataDictionary scaffold. If optional TMSCHEMA rowsets are available, it
+    also includes high-confidence relationship metadata.
 
     Required parameters: connection_name.
     Optional parameters: connections_dir, output_path — when provided the
@@ -1421,6 +2287,7 @@ def generate_data_dictionary(
         "measuregroups": "SELECT * FROM $SYSTEM.MDSCHEMA_MEASUREGROUPS",
         "measures": "SELECT * FROM $SYSTEM.MDSCHEMA_MEASURES",
         "dimensions": "SELECT * FROM $SYSTEM.MDSCHEMA_DIMENSIONS",
+        "levels": "SELECT * FROM $SYSTEM.MDSCHEMA_LEVELS",
     }
 
     raw: dict[str, pd.DataFrame] = {}
@@ -1430,14 +2297,27 @@ def generate_data_dictionary(
         except DAXExecutionError as exc:
             raise execution_failed(query, exc) from exc
 
-    # Build tables from MDSCHEMA_DIMENSIONS
-    tables: list[TableDef] = []
+    # Build tables from MDSCHEMA_DIMENSIONS and enrich columns from MDSCHEMA_LEVELS.
+    table_map: dict[str, TableDef] = {}
     if "dimensions" in raw:
         dim_df = raw["dimensions"]
         dim_name_col = "DIMENSION_NAME"
         if dim_name_col in dim_df.columns:
-            for dim_name in dim_df[dim_name_col].unique():
-                tables.append(TableDef(name=str(dim_name), description=""))
+            for _, row in dim_df.iterrows():
+                dim_name = str(row[dim_name_col])
+                description = str(row.get("DESCRIPTION", "") or "")
+                table_map.setdefault(dim_name, TableDef(name=dim_name, description=description))
+
+    if "levels" in raw:
+        seen_columns: set[tuple[str, str]] = set()
+        for table_name, column in _columns_from_levels(raw["levels"]):
+            key = (table_name, column.name)
+            if key in seen_columns:
+                continue
+            seen_columns.add(key)
+            table = table_map.setdefault(table_name, TableDef(name=table_name, description=""))
+            table.columns.append(column)
+    tables = list(table_map.values())
 
     # Build measures from MDSCHEMA_MEASURES
     measures: list[MeasureDef] = []
@@ -1448,11 +2328,24 @@ def generate_data_dictionary(
         if name_col in meas_df.columns:
             for _, row in meas_df.iterrows():
                 expression = str(row.get(unique_col, "")) if unique_col in meas_df.columns else ""
+                description = str(row.get("DESCRIPTION", "") or "")
                 measures.append(
-                    MeasureDef(name=str(row[name_col]), expression=expression, description="")
+                    MeasureDef(name=str(row[name_col]), expression=expression, description=description)
                 )
 
-    dd = DataDictionary(version="1.0", tables=tables, measures=measures, filters=[])
+    relationship_probe = _load_tmschema_relationships(connection)
+    relationships = [
+        RelationshipDef.model_validate(item)
+        for item in relationship_probe["relationships"]
+    ] if relationship_probe["supported"] else []
+
+    dd = DataDictionary(
+        version="1.0",
+        tables=tables,
+        measures=measures,
+        filters=[],
+        relationships=relationships,
+    )
 
     yaml_content = yaml.dump(
         dd.model_dump(exclude_defaults=False),
@@ -1465,6 +2358,9 @@ def generate_data_dictionary(
         "yaml_content": yaml_content,
         "table_count": len(tables),
         "measure_count": len(measures),
+        "relationship_count": len(relationships),
+        "relationship_source": "tmschema" if relationships else "unavailable",
+        "relationship_message": relationship_probe["message"],
     }
 
     if output_path:

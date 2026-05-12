@@ -181,6 +181,12 @@ class ContosoCube:
             return self._mdschema_levels()
         if "MDSCHEMA_MEASURES" in upper:
             return self._mdschema_measures()
+        if "TMSCHEMA_RELATIONSHIPS" in upper:
+            return self._tmschema_relationships()
+        if "TMSCHEMA_TABLES" in upper:
+            return self._tmschema_tables()
+        if "TMSCHEMA_COLUMNS" in upper:
+            return self._tmschema_columns()
 
         # Simple EVALUATE queries
         if upper.startswith("EVALUATE"):
@@ -223,11 +229,30 @@ class ContosoCube:
 
     def _mdschema_levels(self) -> MockRecordset:
         return MockRecordset(
-            fields=["CUBE_NAME", "HIERARCHY_UNIQUE_NAME", "LEVEL_NAME", "DESCRIPTION"],
+            fields=[
+                "CUBE_NAME",
+                "DIMENSION_UNIQUE_NAME",
+                "HIERARCHY_UNIQUE_NAME",
+                "LEVEL_NAME",
+                "DESCRIPTION",
+                "DATA_TYPE",
+            ],
             rows=[
-                ("Contoso Sales", "[Products].[Category]", "Category", "Product category level"),
-                ("Contoso Sales", "[Calendar].[Month]", "Month", "Month level"),
-                ("Contoso Sales", "[Calendar].[Year]", "Year", "Year level"),
+                ("Contoso Sales", "[Sales]", "[Sales].[SalesKey]", "SalesKey", "Unique transaction identifier", "integer"),
+                ("Contoso Sales", "[Sales]", "[Sales].[ProductKey]", "ProductKey", "Foreign key to Products table", "integer"),
+                ("Contoso Sales", "[Sales]", "[Sales].[DateKey]", "DateKey", "Foreign key to Calendar table", "integer"),
+                ("Contoso Sales", "[Sales]", "[Sales].[Quantity]", "Quantity", "Number of units sold", "integer"),
+                ("Contoso Sales", "[Sales]", "[Sales].[Amount]", "Amount", "Transaction amount in USD", "decimal"),
+                ("Contoso Sales", "[Products]", "[Products].[ProductKey]", "ProductKey", "Unique product identifier", "integer"),
+                ("Contoso Sales", "[Products]", "[Products].[ProductName]", "ProductName", "Display name of the product", "string"),
+                ("Contoso Sales", "[Products]", "[Products].[Category]", "Category", "Product category level", "string"),
+                ("Contoso Sales", "[Products]", "[Products].[Price]", "Price", "Unit price in USD", "decimal"),
+                ("Contoso Sales", "[Calendar]", "[Calendar].[DateKey]", "DateKey", "Surrogate key for the date", "integer"),
+                ("Contoso Sales", "[Calendar]", "[Calendar].[Date]", "Date", "Calendar date", "datetime"),
+                ("Contoso Sales", "[Calendar]", "[Calendar].[Month]", "Month", "Month level", "string"),
+                ("Contoso Sales", "[Calendar]", "[Calendar].[MonthNum]", "MonthNum", "Month number", "integer"),
+                ("Contoso Sales", "[Calendar]", "[Calendar].[Year]", "Year", "Year level", "integer"),
+                ("Contoso Sales", "[Calendar]", "[Calendar].[Weekday]", "Weekday", "Day of the week", "string"),
             ],
         )
 
@@ -240,6 +265,55 @@ class ContosoCube:
                 ("Contoso Sales", "Avg Price", "[Measures].[Avg Price]", "AVERAGE of Price"),
                 ("Contoso Sales", "Product Count", "[Measures].[Product Count]", "COUNT of Products"),
                 ("Contoso Sales", "Day Count", "[Measures].[Day Count]", "COUNT of Calendar days"),
+            ],
+        )
+
+    def _tmschema_tables(self) -> MockRecordset:
+        return MockRecordset(
+            fields=["ID", "Name"],
+            rows=[
+                (1, "Sales"),
+                (2, "Products"),
+                (3, "Calendar"),
+            ],
+        )
+
+    def _tmschema_columns(self) -> MockRecordset:
+        return MockRecordset(
+            fields=["ID", "TableID", "ExplicitName"],
+            rows=[
+                (101, 1, "SalesKey"),
+                (102, 1, "ProductKey"),
+                (103, 1, "DateKey"),
+                (104, 1, "Quantity"),
+                (105, 1, "Amount"),
+                (201, 2, "ProductKey"),
+                (202, 2, "ProductName"),
+                (203, 2, "Category"),
+                (204, 2, "Price"),
+                (301, 3, "DateKey"),
+                (302, 3, "Date"),
+                (303, 3, "Month"),
+                (304, 3, "MonthNum"),
+                (305, 3, "Year"),
+                (306, 3, "Weekday"),
+            ],
+        )
+
+    def _tmschema_relationships(self) -> MockRecordset:
+        return MockRecordset(
+            fields=[
+                "FromColumnID",
+                "ToColumnID",
+                "FromCardinality",
+                "ToCardinality",
+                "CrossFilteringBehavior",
+                "IsActive",
+                "Description",
+            ],
+            rows=[
+                (102, 201, "many", "one", "single", True, "Sales ProductKey filters Products ProductKey"),
+                (103, 301, "many", "one", "single", True, "Sales DateKey filters Calendar DateKey"),
             ],
         )
 

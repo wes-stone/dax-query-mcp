@@ -102,3 +102,25 @@ filters:
     column: Calendar[Month]
     description: Filter by month name
     suggested_values: ["January", "February", "March"]
+
+relationships:
+  - from_table: Sales
+    from_column: ProductKey
+    to_table: Products
+    to_column: ProductKey
+    cardinality: many-to-one
+    cross_filter_direction: single
+    is_active: true
+    description: Sales transactions roll up to product attributes through ProductKey
+    source: curated
+    confidence: high
+  - from_table: Sales
+    from_column: DateKey
+    to_table: Calendar
+    to_column: DateKey
+    cardinality: many-to-one
+    cross_filter_direction: single
+    is_active: true
+    description: Sales transactions roll up to calendar attributes through DateKey
+    source: curated
+    confidence: high

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, Field
@@ -47,6 +47,21 @@ class FilterDef(BaseModel):
     suggested_values: list[str] = Field(default_factory=list)
 
 
+class RelationshipDef(BaseModel):
+    """A relationship between two semantic model columns."""
+
+    from_table: str
+    from_column: str
+    to_table: str
+    to_column: str
+    cardinality: Literal["many-to-one", "one-to-many", "one-to-one", "many-to-many"] = "many-to-one"
+    cross_filter_direction: Literal["single", "both"] = "single"
+    is_active: bool = True
+    description: str = ""
+    source: Literal["curated", "tmschema", "tmsl", "mdschema-inferred"] = "curated"
+    confidence: Literal["high", "medium", "low"] = "high"
+
+
 class DataDictionary(BaseModel):
     """Top-level data dictionary describing a semantic model."""
 
@@ -54,6 +69,7 @@ class DataDictionary(BaseModel):
     tables: list[TableDef] = Field(default_factory=list)
     measures: list[MeasureDef] = Field(default_factory=list)
     filters: list[FilterDef] = Field(default_factory=list)
+    relationships: list[RelationshipDef] = Field(default_factory=list)
 
 
 # ── YAML I/O ─────────────────────────────────────────────────────────────────
