@@ -1,0 +1,35 @@
+{
+  "allowed_file_globs": [
+    "Connections/sample_connection.yaml",
+    "Connections/sample_connection.md",
+    "Connections/mock_contoso.yaml",
+    "Connections/mock_contoso.md",
+    "Connections/mock_contoso_overview.md",
+    "Connections/mock_contoso.data_dictionary.yaml",
+    "queries/sample_query.yaml"
+  ],
+  "blocked_file_globs": [
+    "Connections/*.yaml",
+    "Connections/*.yml",
+    "Connections/*.md",
+    "Connections/*.json",
+    "Connections/*.env",
+    "queries/*.yaml",
+    "queries/*.dax",
+    "queries/*.queryBuilder"
+  ],
+  "blocked_content_patterns": [
+    {
+      "pattern": "Data Source=powerbi://api\\.powerbi\\.com/v1\\.0/myorg/(?!SampleWorkspace\\b|YourWorkspace\\b)",
+      "reason": "Potential real Power BI workspace URI detected"
+    },
+    {
+      "pattern": "\\bdataset_id\\s*:\\s*\"(?!00000000-0000-0000-0000-000000000000)[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\"",
+      "reason": "Potential real Power BI dataset ID detected"
+    },
+    {
+      "pattern": "POST\\s+https://api\\.powerbi\\.com/v1\\.0/myorg/datasets/(?!00000000-0000-0000-0000-000000000000)[0-9a-fA-F-]{36}/executeQueries",
+      "reason": "Potential real Power BI executeQueries dataset endpoint detected"
+    }
+  ]
+}
