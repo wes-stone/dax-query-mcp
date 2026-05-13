@@ -146,7 +146,7 @@ Add to `.copilot/mcp.json` (or your MCP client config):
   "mcpServers": {
     "dax-query-server": {
       "command": "uv",
-      "args": ["run", "--directory", "C:\\path\\to\\dax-query-mcp", "dax-query-server"],
+      "args": ["--directory", "C:\\path\\to\\dax-query-mcp", "run", "--no-sync", "dax-query-server"],
       "env": {
         "DAX_QUERY_MCP_CONNECTIONS_DIR": "C:\\absolute\\path\\to\\Connections"
       }
@@ -154,6 +154,10 @@ Add to `.copilot/mcp.json` (or your MCP client config):
   }
 }
 ```
+
+Run `uv sync` manually after dependency changes. Keep MCP startup on
+`uv run --no-sync` so the server does not try to mutate its virtual environment
+while the executable is already running.
 
 > **Tip:** `DAX_QUERY_MCP_CONNECTIONS_DIR` lets you share one `Connections/` folder across workspaces.
 
