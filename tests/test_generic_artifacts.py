@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from scripts.check_generic_artifacts import scan_generic_artifacts
+from dax_query_mcp.generic_artifacts import scan_generic_artifacts
 
 
 def test_shareable_artifacts_do_not_contain_internal_examples() -> None:
