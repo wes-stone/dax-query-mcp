@@ -23,6 +23,10 @@ LEGACY_CONNECTIONS_DIR = "queries"
 SAMPLE_CONNECTION_STEM = "sample_connection"
 
 
+def default_user_connections_dir() -> Path:
+    return Path.home() / ".copilot" / "dax-query-mcp" / "Connections"
+
+
 def resolve_connections_dir(connections_dir: str | Path | None = None) -> Path:
     if connections_dir is not None:
         return Path(connections_dir)
@@ -35,7 +39,7 @@ def resolve_connections_dir(connections_dir: str | Path | None = None) -> Path:
     if legacy.exists():
         return legacy
 
-    return preferred
+    return default_user_connections_dir()
 
 
 def create_sample_connection_config(connections_dir: str | Path) -> Path:

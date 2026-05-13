@@ -149,14 +149,18 @@ def run_copilot_review(repo_root: Path, changed_files: list[str], diff_text: str
         "--no-custom-instructions",
         "--disable-builtin-mcps",
     ]
-    completed = subprocess.run(
-        command,
-        cwd=repo_root,
-        capture_output=True,
-        text=True,
-        timeout=120,
-        check=False,
-    )
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return _handle_copilot_failure("Copilot CLI review timed out after 120 seconds")
+
     stdout = completed.stdout.strip()
 
     if completed.returncode != 0:

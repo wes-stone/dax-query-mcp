@@ -3,7 +3,14 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from dax_query_mcp.copilot_guard import deterministic_scan, iter_added_lines, load_guard_config
+import subprocess
+
+from dax_query_mcp.copilot_guard import (
+    deterministic_scan,
+    iter_added_lines,
+    load_guard_config,
+    run_copilot_review,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -123,3 +130,19 @@ def test_load_guard_config_merges_tracked_and_local_files(tmp_path, monkeypatch)
 
     assert config["blocked_file_globs"] == ["Connections/*.yaml"]
     assert config["blocked_content_patterns"][0]["pattern"] == "PrivateWorkspace"
+
+
+def test_run_copilot_review_handles_timeout_with_fail_open(tmp_path, monkeypatch) -> None:
+    def timeout_run(*args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd="copilot", timeout=120)
+
+    monkeypatch.setattr(subprocess, "run", timeout_run)
+    monkeypatch.setenv("COPILOT_GUARD_FAIL_OPEN", "1")
+
+    result = run_copilot_review(tmp_path, ["README.md"], "diff")
+
+    assert result == {
+        "allow": True,
+        "summary": "Copilot CLI review timed out after 120 seconds",
+        "findings": [],
+    }

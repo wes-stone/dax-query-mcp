@@ -6,38 +6,66 @@ from fastmcp.exceptions import ToolError
 
 from dax_query_mcp.mcp_server import (
     _FOLLOWUP_MENU,
+    _NEXT_STEPS,
     _SERVER_INSTRUCTIONS,
     _workstation,
+    check_ai_readiness,
+    check_context_staleness,
     clear_workstation,
     copy_to_clipboard,
+    create_query_pack,
+    describe_query_pack,
+    diff_data_dictionary,
     export_to_csv,
+    export_query_pack,
     export_workstation,
+    grouped_followup_menu,
+    followup_recommendations,
     followup_menu,
     generate_data_dictionary,
     get_connection_context,
+    get_context_bundle,
     get_data_dictionary,
+    get_filter_suggestions,
+    get_measure_detail,
     get_query_builder_schema,
+    get_relationships,
     get_schema,
+    get_table_detail,
     inspect_connection_metadata,
     inspect_model_metadata,
     list_connections,
+    list_validated_queries,
     list_workstation,
+    merge_data_dictionary,
+    probe_tmschema_capabilities,
     quick_chart,
     remove_from_workstation,
+    review_data_dictionary_update,
     run_connection_query,
     scaffold_dax_workspace,
     save_query_builder,
+    save_query_to_pack,
     save_to_workstation,
+    save_validated_query,
     scaffold_power_query,
     scaffold_streamlit_app,
     search_columns,
     search_connection_context,
     search_measures,
+    search_validated_queries,
+    server_info,
     summarize_dataframe,
     summarize_rowset,
+    list_query_pack,
+    validate_query_pack,
+    validate_query_library,
 )
 
 import pytest
+
+from dax_query_mcp.followups import FOLLOWUP_ACTIONS, catalog_actions, rendered_next_steps
+from dax_query_mcp.models import DAXConnectionConfig
 
 
 @pytest.fixture(autouse=True)
@@ -46,6 +74,16 @@ def _clear_workstation():
     _workstation.clear()
     yield
     _workstation.clear()
+
+
+@pytest.fixture
+def mock_streamlit_connection(monkeypatch):
+    """Give scaffold_streamlit_app a deterministic local connection."""
+
+    def _fake_get_connection(connection_name: str, connections_dir: str) -> DAXConnectionConfig:
+        return DAXConnectionConfig(name=connection_name, connection_string="MOCK://contoso")
+
+    monkeypatch.setattr("dax_query_mcp.mcp_server._get_connection", _fake_get_connection)
 
 
 def test_summarize_dataframe_returns_preview_and_columns() -> None:
@@ -599,7 +637,7 @@ def test_scaffold_power_query_default_table_name(tmp_path) -> None:
 # ── scaffold_streamlit_app tests ─────────────────────────────────────
 
 
-def test_scaffold_streamlit_app_contains_streamlit_imports() -> None:
+def test_scaffold_streamlit_app_contains_streamlit_imports(mock_streamlit_connection) -> None:
     """Generated code imports streamlit and pandas."""
     payload = json.loads(
         scaffold_streamlit_app(
@@ -608,11 +646,18 @@ def test_scaffold_streamlit_app_contains_streamlit_imports() -> None:
         )
     )
     code = payload["code"]
+    compile(code, "app.py", "exec")
     assert "import streamlit as st" in code
     assert "import pandas as pd" in code
+    assert "execute_dax" in code
+    assert "Query catalog" in code
+    assert "Explore" in code
+    assert "Drag-and-drop data explorer" in code
+    assert "Run the query to see results, charts, and pivots here." in code
+    assert "replace the sample DataFrame" not in code
 
 
-def test_scaffold_streamlit_app_contains_dax_query() -> None:
+def test_scaffold_streamlit_app_contains_dax_query(mock_streamlit_connection) -> None:
     """Generated code embeds the DAX query string."""
     dax = 'EVALUATE SUMMARIZECOLUMNS(Sales[Month], "Total", SUM(Sales[Amount]))'
     payload = json.loads(
@@ -625,7 +670,7 @@ def test_scaffold_streamlit_app_contains_dax_query() -> None:
     assert "Sales[Amount]" in payload["code"]
 
 
-def test_scaffold_streamlit_app_custom_title() -> None:
+def test_scaffold_streamlit_app_custom_title(mock_streamlit_connection) -> None:
     """Custom title is reflected in the generated code."""
     payload = json.loads(
         scaffold_streamlit_app(
@@ -637,7 +682,7 @@ def test_scaffold_streamlit_app_custom_title() -> None:
     assert "Monthly Revenue Dashboard" in payload["code"]
 
 
-def test_scaffold_streamlit_app_writes_file(tmp_path) -> None:
+def test_scaffold_streamlit_app_writes_file(tmp_path, mock_streamlit_connection) -> None:
     """When output_path is provided, the file is written to disk."""
     out_file = tmp_path / "my_app.py"
     payload = json.loads(
@@ -650,7 +695,9 @@ def test_scaffold_streamlit_app_writes_file(tmp_path) -> None:
     assert out_file.exists()
     assert payload["file_path"] == str(out_file)
     contents = out_file.read_text(encoding="utf-8")
+    compile(contents, str(out_file), "exec")
     assert "import streamlit as st" in contents
+    assert "Run query" in contents
     assert payload["code"] == contents
 
 
@@ -912,6 +959,23 @@ def test_search_measures_expression_truncated(tmp_path) -> None:
     assert len(results[0]["expression"]) <= 104  # 100 chars + "..."
 
 
+def test_search_measures_live_fallback_without_dictionary(tmp_path) -> None:
+    """search_measures falls back to live MDSCHEMA when no dictionary exists."""
+    connections_dir = _make_contoso_connections(tmp_path)
+
+    results = json.loads(
+        search_measures(
+            connection_name="contoso",
+            search_term="SUM of",
+            connections_dir=str(connections_dir),
+        )
+    )
+
+    assert len(results) >= 2
+    assert {result["source"] for result in results} == {"live_mdschema"}
+    assert {result["name"] for result in results} >= {"Total Sales", "Total Quantity"}
+
+
 # ── get_data_dictionary tests ────────────────────────────────────────
 
 
@@ -930,6 +994,8 @@ def test_get_data_dictionary_found(tmp_path) -> None:
     assert dd["version"] == "1.0"
     assert len(dd["tables"]) == 3
     assert len(dd["measures"]) == 5
+    assert len(dd["relationships"]) == 2
+    assert dd["relationships"][0]["source"] == "curated"
 
 
 def test_get_data_dictionary_not_found(tmp_path) -> None:
@@ -976,6 +1042,13 @@ def test_get_schema_with_data_dictionary(tmp_path) -> None:
     # Filters
     assert len(payload["filters"]) == 3
 
+    # Relationships
+    assert len(payload["relationships"]) == 2
+    assert any(
+        r["from"] == "Sales[ProductKey]" and r["to"] == "Products[ProductKey]"
+        for r in payload["relationships"]
+    )
+
 
 def test_get_schema_without_data_dictionary(tmp_path) -> None:
     """get_schema returns a fallback message when no data dictionary exists."""
@@ -1007,6 +1080,61 @@ description: "REST model"
     assert payload["has_data_dictionary"] is False
     assert "REST" in payload["message"]
     assert "data dictionary" in payload["message"]
+
+
+# ── structured context layer tests ────────────────────────────────────
+
+
+def test_get_context_bundle_overview_includes_progressive_hints(tmp_path) -> None:
+    """get_context_bundle returns counts, relationships, and next context levels."""
+    connections_dir = _make_contoso_connections_with_dd(tmp_path)
+
+    payload = json.loads(
+        get_context_bundle(
+            connection_name="contoso",
+            connections_dir=str(connections_dir),
+        )
+    )
+
+    assert payload["context_level"] == "overview"
+    assert payload["counts"]["relationships"] == 2
+    assert payload["next_levels"] == ["schema", "full"]
+    assert payload["relationships"][0]["from"].startswith("Sales[")
+
+
+def test_context_detail_tools_return_scoped_dictionary_payloads(tmp_path) -> None:
+    """Scoped context tools return tables, measures, relationships, and filters."""
+    connections_dir = _make_contoso_connections_with_dd(tmp_path)
+
+    table_payload = json.loads(get_table_detail("contoso", "Sales", str(connections_dir)))
+    measure_payload = json.loads(get_measure_detail("contoso", "Total Sales", str(connections_dir)))
+    relationship_payload = json.loads(get_relationships("contoso", "Products", str(connections_dir)))
+    filter_payload = json.loads(get_filter_suggestions("contoso", "Month Filter", str(connections_dir)))
+
+    assert table_payload["found"] is True
+    assert table_payload["table"]["name"] == "Sales"
+    assert len(table_payload["relationships"]) == 2
+    assert measure_payload["measure"]["expression"] == "SUM(Sales[Amount])"
+    assert relationship_payload["relationship_count"] == 1
+    assert relationship_payload["relationships"][0]["to"] == "Products[ProductKey]"
+    assert filter_payload["filter_count"] == 1
+    assert filter_payload["filters"][0]["suggested_values"] == ["January", "February", "March"]
+
+
+def test_context_staleness_readiness_and_tmschema_probe(tmp_path) -> None:
+    """Context health tools report current mock metadata and TMSCHEMA capability."""
+    connections_dir = _make_contoso_connections_with_dd(tmp_path)
+
+    staleness = json.loads(check_context_staleness("contoso", str(connections_dir)))
+    readiness = json.loads(check_ai_readiness("contoso", str(connections_dir)))
+    capabilities = json.loads(probe_tmschema_capabilities("contoso", str(connections_dir)))
+
+    assert staleness["status"] == "current"
+    assert staleness["comparisons"]["relationships"]["checked"] is True
+    assert readiness["status"] == "ready"
+    assert readiness["score"] >= 90
+    assert capabilities["supported"] is True
+    assert capabilities["relationship_count"] == 2
 
 
 def test_inspect_connection_metadata_rest_returns_context_message(tmp_path) -> None:
@@ -1043,6 +1171,8 @@ def test_generate_data_dictionary_valid_yaml(tmp_path) -> None:
     assert "yaml_content" in payload
     assert payload["table_count"] == 3
     assert payload["measure_count"] == 5
+    assert payload["relationship_count"] == 2
+    assert payload["relationship_source"] == "tmschema"
     assert "file_path" not in payload
 
     import yaml
@@ -1072,8 +1202,11 @@ def test_generate_data_dictionary_roundtrip(tmp_path) -> None:
     dd = DataDictionary.model_validate(raw)
     assert len(dd.tables) == 3
     assert len(dd.measures) == 5
-    assert all(t.description == "" for t in dd.tables)
-    assert all(m.description == "" for m in dd.measures)
+    assert sum(len(t.columns) for t in dd.tables) == 15
+    assert any(t.description != "" for t in dd.tables)
+    assert all(m.description != "" for m in dd.measures)
+    assert len(dd.relationships) == 2
+    assert all(r.source == "tmschema" for r in dd.relationships)
 
 
 def test_generate_data_dictionary_file_write(tmp_path) -> None:
@@ -1095,6 +1228,7 @@ def test_generate_data_dictionary_file_write(tmp_path) -> None:
     dd = load_data_dictionary(out_file)
     assert len(dd.tables) == 3
     assert len(dd.measures) == 5
+    assert len(dd.relationships) == 2
 
 
 def test_generate_data_dictionary_correct_counts(tmp_path) -> None:
@@ -1108,14 +1242,17 @@ def test_generate_data_dictionary_correct_counts(tmp_path) -> None:
     )
     assert payload["table_count"] == 3
     assert payload["measure_count"] == 5
+    assert payload["relationship_count"] == 2
     import yaml
 
-    measure_names = [m["name"] for m in yaml.safe_load(payload["yaml_content"])["measures"]]
+    generated = yaml.safe_load(payload["yaml_content"])
+    measure_names = [m["name"] for m in generated["measures"]]
     assert "Total Sales" in measure_names
     assert "Total Quantity" in measure_names
     assert "Avg Price" in measure_names
     assert "Product Count" in measure_names
     assert "Day Count" in measure_names
+    assert any(t["name"] == "Sales" and len(t["columns"]) == 5 for t in generated["tables"])
 
 
 def test_generate_data_dictionary_rest_uses_existing_dictionary_message(tmp_path) -> None:
@@ -1152,6 +1289,53 @@ filters: []
     assert payload["table_count"] == 1
     assert payload["measure_count"] == 1
     assert "data_dictionary" in payload
+
+
+def test_data_dictionary_lifecycle_tools(tmp_path: Path) -> None:
+    curated_path = tmp_path / "curated.yaml"
+    generated_path = tmp_path / "generated.yaml"
+    output_path = tmp_path / "merged.yaml"
+    curated_path.write_text(
+        """
+version: "1.0"
+tables:
+  - name: Sales
+    description: Curated sales fact
+    columns:
+      - name: Amount
+        description: Curated amount
+""".strip(),
+        encoding="utf-8",
+    )
+    generated_path.write_text(
+        """
+version: "1.0"
+tables:
+  - name: Sales
+    columns:
+      - name: Amount
+        data_type: decimal
+  - name: Calendar
+""".strip(),
+        encoding="utf-8",
+    )
+
+    diff = json.loads(diff_data_dictionary(str(curated_path), str(generated_path)))
+    assert diff["tables"]["added"] == ["Calendar"]
+
+    review = json.loads(review_data_dictionary_update(str(curated_path), str(generated_path)))
+    assert review["summary"]["tables"] == 2
+    assert review["merged"]["tables"][0]["description"] == "Curated sales fact"
+
+    merged = json.loads(
+        merge_data_dictionary(
+            generated_path=str(generated_path),
+            curated_path=str(curated_path),
+            output_path=str(output_path),
+        )
+    )
+    assert output_path.exists()
+    assert merged["data_dictionary"]["tables"][0]["columns"][0]["description"] == "Curated amount"
 
 
 # ── followup_menu resource tests ────────────────────────────────────────
@@ -1200,6 +1384,88 @@ def test_followup_menu_actions_have_example_usage() -> None:
         assert len(action["example_usage"]) > 0
 
 
+def test_followup_catalog_is_generated_from_registry() -> None:
+    """The stable resource catalog stays in sync with the central registry."""
+    assert _FOLLOWUP_MENU == catalog_actions()
+    assert _NEXT_STEPS == rendered_next_steps()
+    assert {item["name"] for item in _FOLLOWUP_MENU} == {
+        action.name for action in FOLLOWUP_ACTIONS if action.catalog_visible
+    }
+
+
+def test_grouped_followup_menu_splits_query_and_pack_actions() -> None:
+    payload = json.loads(grouped_followup_menu())
+    groups = {group["scope"]: group for group in payload["groups"]}
+
+    assert "this_query" in groups
+    assert "current_pack" in groups
+    assert payload["flat_rendered_menu"] == rendered_next_steps()
+    assert "export_to_csv" in {action["name"] for action in groups["this_query"]["actions"]}
+    assert "export_query_pack" in {action["name"] for action in groups["current_pack"]["actions"]}
+    assert all("scope" in action for group in groups.values() for action in group["actions"])
+
+
+def test_server_info_returns_runtime_diagnostics(tmp_path: Path) -> None:
+    payload = json.loads(server_info(connections_dir=str(tmp_path / "Connections")))
+
+    assert payload["package"] == "dax-query-mcp"
+    assert payload["version"]
+    assert payload["runtime_path"].endswith("mcp_server.py")
+    assert payload["resolved_connections_dir"].endswith("Connections")
+    assert payload["followup_actions"]["rendered_menu_count"] == len(_NEXT_STEPS)
+    assert payload["followup_actions"]["group_count"] >= 2
+    assert "scaffold_module" in payload["template_hashes"]
+
+
+def test_run_connection_query_renders_registry_followup_menu(monkeypatch, tmp_path) -> None:
+    """The markdown query response embeds the registry-defined numbered menu."""
+    connections_dir = tmp_path / "Connections"
+    connections_dir.mkdir()
+    (connections_dir / "sales.yaml").write_text(
+        "connection_string: 'Provider=MSOLAP.8;Data Source=localhost'\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "dax_query_mcp.mcp_server.dax_to_pandas",
+        lambda **kwargs: pd.DataFrame({"Month": ["2026-01"], "Revenue": [42]}),
+    )
+
+    result = run_connection_query(
+        connection_name="sales",
+        query='EVALUATE ROW("Revenue", 42)',
+        connections_dir=str(connections_dir),
+    )
+
+    for index, step in enumerate(rendered_next_steps(), start=1):
+        assert f"{index}. {step}" in result
+
+
+def test_followup_recommendations_use_latest_query_context(monkeypatch, tmp_path) -> None:
+    """Recommendations are ranked from the latest result shape."""
+    connections_dir = tmp_path / "Connections"
+    connections_dir.mkdir()
+    (connections_dir / "sales.yaml").write_text(
+        "connection_string: 'Provider=MSOLAP.8;Data Source=localhost'\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "dax_query_mcp.mcp_server.dax_to_pandas",
+        lambda **kwargs: pd.DataFrame({"Month": ["2026-01", "2026-02"], "Revenue": [42, 84]}),
+    )
+
+    run_connection_query(
+        connection_name="sales",
+        query='EVALUATE ROW("Revenue", 42)',
+        connections_dir=str(connections_dir),
+    )
+    payload = json.loads(followup_recommendations())
+
+    assert payload["has_query_context"] is True
+    assert payload["latest_query"]["numeric_columns"] == ["Revenue"]
+    recommended_names = [item["name"] for item in payload["recommended_actions"]]
+    assert recommended_names[:2] == ["save_to_workstation", "quick_chart"]
+
+
 # ---------------------------------------------------------------------------
 # Docstring quality tests
 # ---------------------------------------------------------------------------
@@ -1215,7 +1481,31 @@ def _get_mcp_tool_functions():
     return [(t.name, t.fn) for t in tools]
 
 
+def _get_mcp_prompt_functions():
+    """Return (name, func) pairs for every @mcp.prompt()-registered function."""
+    import asyncio
+    lp = getattr(_mcp_server, '_local_provider', None) or getattr(_mcp_server, 'local_provider', None)
+    prompts = asyncio.run(lp.list_prompts())
+    return [(p.name, p.fn) for p in prompts]
+
+
 _PLACEHOLDER_PREFIXES = ("todo", "fixme", "hack", "xxx", "placeholder")
+
+
+def test_context_workflow_prompts_are_registered() -> None:
+    """Common context and follow-up workflow prompts are available."""
+    prompts = dict(_get_mcp_prompt_functions())
+
+    assert {
+        "explore_connection",
+        "find_measure_for_metric",
+        "write_filtered_dax_query",
+        "build_period_comparison_query",
+        "export_query_results",
+    } <= set(prompts)
+    assert "get_context_bundle" in prompts["explore_connection"]("contoso")
+    assert "search_measures" in prompts["find_measure_for_metric"]("contoso", "sales")
+    assert "follow-up" in prompts["export_query_results"]("contoso", "EVALUATE Sales")
 
 
 def test_all_mcp_tools_have_docstrings() -> None:
@@ -1429,8 +1719,14 @@ def test_export_workstation_scaffold(tmp_path) -> None:
     assert len(payload["files_created"]) >= 4  # 2 .dax + run_queries.py + pyproject + README
     assert (out_dir / "queries" / "revenue.dax").exists()
     assert (out_dir / "queries" / "cost.dax").exists()
+    assert (out_dir / "pack.yaml").exists()
+    assert (out_dir / "connections.json").exists()
     assert (out_dir / "run_queries.py").exists()
+    assert (out_dir / "streamlit_app.py").exists()
+    assert (out_dir / "power_query" / "revenue.pq").exists()
+    assert (out_dir / "power_query" / "cost.pq").exists()
     assert (out_dir / "pyproject.toml").exists()
+    assert not (out_dir / "requirements.txt").exists()
     assert (out_dir / "README.md").exists()
 
     readme = (out_dir / "README.md").read_text(encoding="utf-8")
@@ -1443,6 +1739,400 @@ def test_export_workstation_scaffold(tmp_path) -> None:
 
     pyproject = (out_dir / "pyproject.toml").read_text(encoding="utf-8")
     assert "ipykernel" in pyproject
+
+
+def test_query_pack_tool_workflow_exports_artifacts(tmp_path) -> None:
+    """Query-pack tools create, validate, list, and export a reusable pack."""
+    connections_dir = tmp_path / "Connections"
+    connections_dir.mkdir()
+    (connections_dir / "ms_model.yaml").write_text(
+        'connection_string: "Provider=MSOLAP;Data Source=localhost:1234;Initial Catalog=Model"\n'
+        'description: "MSOLAP model"\n',
+        encoding="utf-8",
+    )
+
+    pack_dir = tmp_path / "revenue_pack"
+    created = json.loads(
+        create_query_pack(
+            output_dir=str(pack_dir),
+            name="Revenue Pack",
+            description="Reusable revenue exploration queries",
+        )
+    )
+    assert created["query_count"] == 0
+    assert (pack_dir / "pack.yaml").exists()
+
+    saved = json.loads(
+        save_query_to_pack(
+            pack_path=str(pack_dir),
+            connection_name="ms_model",
+            query='EVALUATE ROW("Revenue", {{amount}})',
+            description="Revenue query",
+            query_id="revenue",
+            display_name="Revenue",
+            tags="arr, monthly",
+            parameters_json=json.dumps({"amount": {"type": "number", "default": 42}}),
+            table_name="RevenueTable",
+        )
+    )
+    assert saved["query_id"] == "revenue"
+    assert (pack_dir / "queries" / "revenue.dax").exists()
+
+    listing = json.loads(list_query_pack(str(pack_dir)))
+    assert listing["query_count"] == 1
+    assert listing["queries"][0]["parameters"] == ["amount"]
+
+    validation = json.loads(validate_query_pack(str(pack_dir), connections_dir=str(connections_dir)))
+    assert validation["valid"] is True
+
+    export_dir = tmp_path / "exported_pack"
+    exported = json.loads(
+        export_query_pack(
+            pack_path=str(pack_dir),
+            output_dir=str(export_dir),
+            connections_dir=str(connections_dir),
+        )
+    )
+    assert exported["query_count"] == 1
+    assert (export_dir / "pack.yaml").exists()
+    assert (export_dir / "connections.json").exists()
+    assert (export_dir / "run_queries.py").exists()
+    assert (export_dir / "streamlit_app.py").exists()
+    assert (export_dir / "pyproject.toml").exists()
+    assert not (export_dir / "requirements.txt").exists()
+    assert (export_dir / "README.md").exists()
+    m_code = (export_dir / "power_query" / "revenue.pq").read_text(encoding="utf-8")
+    assert "AnalysisServices.Database" in m_code
+    assert "{{amount}}" not in m_code
+    assert 'EVALUATE ROW(""Revenue"", 42)' in m_code
+
+    readme = (export_dir / "README.md").read_text(encoding="utf-8")
+    assert "uv sync" in readme
+    assert "pip install" not in readme
+
+    description = json.loads(describe_query_pack(str(pack_dir), connections_dir=str(connections_dir)))
+    assert "## Query Pack: Revenue Pack" in description["markdown"]
+    assert "| revenue | Revenue | ms_model | arr, monthly | amount | RevenueTable |" in description["markdown"]
+    assert description["validation"]["valid"] is True
+
+
+def test_validate_query_pack_can_dry_run_each_query(tmp_path, monkeypatch) -> None:
+    connections_dir = tmp_path / "Connections"
+    connections_dir.mkdir()
+    (connections_dir / "mock_model.yaml").write_text(
+        'connection_string: "MOCK://contoso"\ndescription: "Mock model"\n',
+        encoding="utf-8",
+    )
+    pack_dir = tmp_path / "pack"
+    create_query_pack(output_dir=str(pack_dir), name="Pack")
+    save_query_to_pack(
+        pack_path=str(pack_dir),
+        connection_name="mock_model",
+        query='EVALUATE ROW("Ping", {{amount}})',
+        description="Ping",
+        query_id="ping",
+        parameters_json=json.dumps({"amount": {"type": "number", "default": 7}}),
+    )
+
+    calls = []
+
+    def _fake_execute(connection, query, *, preview_rows=10, max_rows=None, profile=False):
+        calls.append((connection.name, query, max_rows))
+        return pd.DataFrame({"Ping": [7]})
+
+    monkeypatch.setattr("dax_query_mcp.mcp_server._execute_connection_dataframe", _fake_execute)
+
+    validation = json.loads(
+        validate_query_pack(
+            str(pack_dir),
+            connections_dir=str(connections_dir),
+            dry_run=True,
+            max_rows=1,
+        )
+    )
+
+    assert validation["valid"] is True
+    assert validation["dry_run"]["enabled"] is True
+    assert validation["dry_run"]["success_count"] == 1
+    assert validation["dry_run"]["queries"][0]["columns"] == ["Ping"]
+    assert calls == [("mock_model", 'EVALUATE ROW("Ping", 7)', 1)]
+
+
+def test_validated_query_library_tool_workflow_saves_searches_and_contextualizes(tmp_path) -> None:
+    connections_dir = tmp_path / "Connections"
+    connections_dir.mkdir()
+    (connections_dir / "mock_model.yaml").write_text(
+        'connection_string: "MOCK://contoso"\ndescription: "Mock model"\n',
+        encoding="utf-8",
+    )
+
+    saved = json.loads(
+        save_validated_query(
+            connection_name="mock_model",
+            query='EVALUATE ROW("Revenue", {{amount}})',
+            description="Revenue smoke query",
+            query_id="revenue_smoke",
+            display_name="Revenue Smoke",
+            tags="revenue, smoke",
+            parameters_json=json.dumps({"amount": {"type": "number", "required": True}}),
+            sample_parameters_json=json.dumps({"amount": 7}),
+            table_name="RevenueSmoke",
+            connections_dir=str(connections_dir),
+        )
+    )
+
+    assert saved["query_id"] == "revenue_smoke"
+    assert (connections_dir / "mock_model.validated_queries" / "revenue_smoke.yaml").exists()
+    assert (connections_dir / "mock_model.validated_queries" / "revenue_smoke.dax").exists()
+
+    listing = json.loads(list_validated_queries("mock_model", connections_dir=str(connections_dir)))
+    assert listing["query_count"] == 1
+    assert listing["queries"][0]["validation"]["status"] == "draft"
+    assert "query" not in listing["queries"][0]
+
+    search = json.loads(
+        search_validated_queries(
+            "mock_model",
+            search_term="Revenue",
+            tags="smoke",
+            connections_dir=str(connections_dir),
+        )
+    )
+    assert search["match_count"] == 1
+    assert search["matches"][0]["query"] == 'EVALUATE ROW("Revenue", {{amount}})'
+
+    context = json.loads(get_context_bundle("mock_model", connections_dir=str(connections_dir)))
+    assert context["validated_queries"]["count"] == 1
+    assert context["validated_queries"]["queries"][0]["id"] == "revenue_smoke"
+    assert "query" not in context["validated_queries"]["queries"][0]
+
+
+def test_validate_query_library_persists_status_columns_and_hash(tmp_path, monkeypatch) -> None:
+    connections_dir = tmp_path / "Connections"
+    connections_dir.mkdir()
+    (connections_dir / "mock_model.yaml").write_text(
+        'connection_string: "MOCK://contoso"\ndescription: "Mock model"\n',
+        encoding="utf-8",
+    )
+    save_validated_query(
+        connection_name="mock_model",
+        query='EVALUATE ROW("Ping", {{amount}})',
+        description="Ping",
+        query_id="ping",
+        parameters_json=json.dumps({"amount": {"type": "number", "required": True}}),
+        sample_parameters_json=json.dumps({"amount": 7}),
+        connections_dir=str(connections_dir),
+    )
+    calls = []
+
+    def _fake_execute(connection, query, *, max_rows=None, command_timeout_seconds=None, profile=False):
+        calls.append((connection.name, query, max_rows))
+        return pd.DataFrame({"Ping": [7]})
+
+    monkeypatch.setattr("dax_query_mcp.mcp_server._execute_connection_dataframe", _fake_execute)
+
+    validation = json.loads(
+        validate_query_library(
+            "mock_model",
+            connections_dir=str(connections_dir),
+            query_id="ping",
+            max_rows=1,
+        )
+    )
+    listing = json.loads(
+        list_validated_queries(
+            "mock_model",
+            connections_dir=str(connections_dir),
+            include_dax=True,
+        )
+    )
+
+    assert validation["valid"] is True
+    assert validation["queries"][0]["columns"] == ["Ping"]
+    assert calls == [("mock_model", 'EVALUATE ROW("Ping", 7)', 1)]
+    assert listing["queries"][0]["validation"]["status"] == "validated"
+    assert listing["queries"][0]["validation"]["columns"] == ["Ping"]
+    assert listing["queries"][0]["validation"]["rendered_dax_hash"]
+    assert listing["queries"][0]["query"] == 'EVALUATE ROW("Ping", {{amount}})'
+
+
+def test_validate_query_library_records_missing_required_parameter_failure(tmp_path, monkeypatch) -> None:
+    connections_dir = tmp_path / "Connections"
+    connections_dir.mkdir()
+    (connections_dir / "mock_model.yaml").write_text(
+        'connection_string: "MOCK://contoso"\ndescription: "Mock model"\n',
+        encoding="utf-8",
+    )
+    save_validated_query(
+        connection_name="mock_model",
+        query='EVALUATE ROW("Ping", {{amount}})',
+        description="Ping",
+        query_id="ping",
+        parameters_json=json.dumps({"amount": {"type": "number", "required": True}}),
+        connections_dir=str(connections_dir),
+    )
+
+    def _unexpected_execute(*args, **kwargs):  # pragma: no cover - assertion helper
+        raise AssertionError("query with missing required validation parameter should not execute")
+
+    monkeypatch.setattr("dax_query_mcp.mcp_server._execute_connection_dataframe", _unexpected_execute)
+
+    validation = json.loads(
+        validate_query_library(
+            "mock_model",
+            connections_dir=str(connections_dir),
+            query_id="ping",
+            max_rows=1,
+        )
+    )
+    listing = json.loads(list_validated_queries("mock_model", connections_dir=str(connections_dir)))
+
+    assert validation["valid"] is False
+    assert validation["queries"][0]["status"] == "failed"
+    assert "Missing required query parameter" in validation["queries"][0]["error"]
+    assert listing["queries"][0]["validation"]["status"] == "failed"
+
+
+def test_validate_query_pack_skips_dry_run_when_structure_invalid(tmp_path, monkeypatch) -> None:
+    pack_dir = tmp_path / "pack"
+    create_query_pack(output_dir=str(pack_dir), name="Pack")
+    save_query_to_pack(
+        pack_path=str(pack_dir),
+        connection_name="missing_model",
+        query='EVALUATE ROW("Ping", 1)',
+        description="Ping",
+        query_id="ping",
+    )
+
+    def _unexpected_execute(*args, **kwargs):  # pragma: no cover - assertion helper
+        raise AssertionError("dry-run should not execute structurally invalid packs")
+
+    monkeypatch.setattr("dax_query_mcp.mcp_server._execute_connection_dataframe", _unexpected_execute)
+
+    validation = json.loads(
+        validate_query_pack(
+            str(pack_dir),
+            connections_dir=str(tmp_path / "Connections"),
+            dry_run=True,
+            max_rows=1,
+        )
+    )
+
+    assert validation["valid"] is False
+    assert validation["dry_run"]["enabled"] is False
+    assert "Structural validation failed" in validation["dry_run"]["skipped_reason"]
+
+
+def test_save_query_to_pack_rejects_duplicate_ids_without_overwrite(tmp_path) -> None:
+    """Durable query packs require explicit overwrite for duplicate query IDs."""
+    pack_dir = tmp_path / "pack"
+    create_query_pack(output_dir=str(pack_dir), name="Pack")
+    save_query_to_pack(
+        pack_path=str(pack_dir),
+        connection_name="mock",
+        query='EVALUATE ROW("Ping", 1)',
+        description="Ping",
+        query_id="ping",
+    )
+
+    with pytest.raises((ValueError, ToolError), match="already exists"):
+        save_query_to_pack(
+            pack_path=str(pack_dir),
+            connection_name="mock",
+            query='EVALUATE ROW("Ping", 2)',
+            description="Ping again",
+            query_id="ping",
+        )
+
+
+def test_export_query_pack_power_query_stubs_required_params_without_defaults(tmp_path) -> None:
+    """Power Query pack generation is explicit when static parameter values are unavailable."""
+    connections_dir = tmp_path / "Connections"
+    connections_dir.mkdir()
+    (connections_dir / "ms_model.yaml").write_text(
+        'connection_string: "Provider=MSOLAP;Data Source=localhost:1234;Initial Catalog=Model"\n',
+        encoding="utf-8",
+    )
+    pack_dir = tmp_path / "pack"
+    create_query_pack(output_dir=str(pack_dir), name="Pack")
+    save_query_to_pack(
+        pack_path=str(pack_dir),
+        connection_name="ms_model",
+        query='EVALUATE ROW("Year", {{fiscal_year}})',
+        description="Required parameter query",
+        query_id="required_param",
+        parameters_json=json.dumps({"fiscal_year": {"type": "text", "required": True}}),
+    )
+
+    export_query_pack(pack_path=str(pack_dir), connections_dir=str(connections_dir))
+
+    m_code = (pack_dir / "power_query" / "required_param.pq").read_text(encoding="utf-8")
+    assert "Power Query M was not generated" in m_code
+    assert "Missing required query parameter: fiscal_year" in m_code
+
+
+def test_exported_query_pack_runner_filters_params_and_writes_run_log(tmp_path, monkeypatch) -> None:
+    """Generated query-pack runner supports listing, filtering, params, results, schema, and run logs."""
+    connections_dir = tmp_path / "Connections"
+    connections_dir.mkdir()
+    (connections_dir / "mock_model.yaml").write_text(
+        'connection_string: "MOCK://contoso"\ndescription: "Mock model"\n',
+        encoding="utf-8",
+    )
+    pack_dir = tmp_path / "runner_pack"
+    create_query_pack(output_dir=str(pack_dir), name="Runner Pack")
+    save_query_to_pack(
+        pack_path=str(pack_dir),
+        connection_name="mock_model",
+        query='EVALUATE ROW({{label}}, {{amount}}, "Flag", {{flag}})',
+        description="Parameterized mock query",
+        query_id="ping",
+        tags="mock, smoke",
+        parameters_json=json.dumps({
+            "label": {"type": "text", "default": "Ping"},
+            "amount": {"type": "number", "default": 1},
+            "flag": {"type": "boolean", "default": False},
+        }),
+    )
+    export_query_pack(pack_path=str(pack_dir), connections_dir=str(connections_dir))
+
+    script_path = pack_dir / "run_queries.py"
+    namespace = {"__name__": "generated_run_queries", "__file__": str(script_path)}
+    exec(script_path.read_text(encoding="utf-8"), namespace)
+
+    monkeypatch.setattr("sys.argv", ["run_queries.py", "--list"])
+    assert namespace["main"]() == 0
+
+    results_dir = tmp_path / "results"
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "run_queries.py",
+            "--only",
+            "ping",
+            "--tag",
+            "mock",
+            "--param",
+            "label=Custom",
+            "--param",
+            "amount=7",
+            "--param",
+            "flag=true",
+            "--output",
+            str(results_dir),
+        ],
+    )
+    assert namespace["main"]() == 0
+
+    dataframe = pd.read_csv(results_dir / "ping.csv")
+    assert dataframe.iloc[0]["Custom"] == 7
+    assert bool(dataframe.iloc[0]["Flag"]) is True
+    schema = json.loads((results_dir / "ping.schema.json").read_text(encoding="utf-8"))
+    assert [column["name"] for column in schema["columns"]] == ["Custom", "Flag"]
+    run_log = json.loads((results_dir / "run_log.json").read_text(encoding="utf-8"))
+    assert run_log["failure_count"] == 0
+    assert run_log["queries"][0]["query_id"] == "ping"
+    assert run_log["queries"][0]["status"] == "success"
 
 
 def test_scaffold_dax_workspace_uses_rest_connection_metadata(tmp_path) -> None:

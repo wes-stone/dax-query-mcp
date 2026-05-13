@@ -2,19 +2,35 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import sys
 import re
 import tempfile
-import textwrap
 from datetime import datetime
+from hashlib import sha256
+from importlib import metadata as importlib_metadata
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 import yaml
 from fastmcp import FastMCP
+from fastmcp.exceptions import ToolError
 
 from .connections import load_connections, resolve_connections_dir
-from .data_dictionary import find_data_dictionary
+from .data_dictionary import (
+    ColumnDef,
+    DataDictionary,
+    MeasureDef,
+    RelationshipDef,
+    TableDef,
+    diff_data_dictionaries,
+    find_data_dictionary,
+    load_data_dictionary,
+    merge_data_dictionaries,
+    review_data_dictionary_update as build_data_dictionary_update_review,
+    save_data_dictionary,
+)
 from .errors import (
     admin_query_blocked,
     connection_not_found,
@@ -24,8 +40,25 @@ from .errors import (
 )
 from .exceptions import DAXExecutionError
 from .executor import dax_to_pandas
+from .followups import catalog_actions, grouped_catalog_actions, recommend_actions, rendered_next_steps
 from .formatting import DEFAULT_DATE_FORMAT, dataframe_to_markdown, preview_records
 from .models import TRANSPORT_POWERBI_REST
+from .query_pack import (
+    QueryOutputs,
+    QueryPack,
+    QueryPackEntry,
+    QueryParameter,
+    load_query_pack,
+    describe_query_pack_markdown,
+    power_query_m_from_connection,
+    query_pack_summary,
+    read_query_text,
+    render_dax_template,
+    save_query_pack,
+    slugify_query_id,
+    validate_query_pack as validate_query_pack_model,
+)
+from .query_pack_export import export_query_pack_workspace, write_query_pack_artifacts, write_query_pack_workspace
 from .query_builder import (
     load_query_builder_artifacts,
     query_builder_from_dict,
@@ -33,11 +66,23 @@ from .query_builder import (
     query_builder_to_payload,
     save_query_builder_artifacts,
 )
-from .data_dictionary import DataDictionary, load_data_dictionary, save_data_dictionary, TableDef, MeasureDef
 from .scaffold import (
     build_scaffold_connection_config,
-    render_run_queries_script,
+    render_streamlit_single_query_app,
     scaffold_workspace,
+)
+from .validated_query_library import (
+    ValidatedQueryEntry,
+    failed_validation_record,
+    find_validated_query_entry,
+    load_validated_query_library,
+    render_validated_query,
+    save_validated_query_entry,
+    search_validated_query_entries,
+    summarize_validated_query_entry,
+    update_validation_record,
+    validated_query_library_dir,
+    validation_record_from_result,
 )
 
 DEFAULT_CONNECTIONS_DIR = str(resolve_connections_dir(os.getenv("DAX_QUERY_MCP_CONNECTIONS_DIR")))
@@ -55,7 +100,6 @@ _ROWSET_COLUMNS: dict[str, list[str]] = {
 _ADMIN_QUERY_PATTERNS = re.compile(
     r"""
       \bINFO\s*\.               # INFO.*() DMV functions
-    | \$SYSTEM\.DISCOVER_       # $SYSTEM.DISCOVER_* DMV rowsets
     | \bDBCC\b                  # DBCC commands
     | \bALTER\b                 # DDL: ALTER
     | \bCREATE\b                # DDL: CREATE
@@ -64,24 +108,13 @@ _ADMIN_QUERY_PATTERNS = re.compile(
     """,
     re.IGNORECASE | re.VERBOSE,
 )
+_SYSTEM_ROWSET_PATTERN = re.compile(r"\$SYSTEM\.[A-Z0-9_]+", re.IGNORECASE)
 
 _SAFE_SYSTEM_PREFIXES = (
     "$SYSTEM.MDSCHEMA_",
 )
 
-_NEXT_STEPS = [
-    "Filter / refine — narrow to a specific account, TPID, or time range",
-    "Aggregate — total by month, by account, etc.",
-    "Save to workstation — save this query to your working session",
-    "Copy to clipboard — copy as TSV (paste into Excel) or markdown",
-    "Export as CSV — save results to a CSV file",
-    "Quick chart — generate a bar, line, or pie chart",
-    "Scaffold Power Query — generate Excel Power Query M code",
-    "Scaffold Streamlit — generate a Streamlit dashboard app",
-    "Save to DAX Studio — save as a .dax query builder file",
-    "Scaffold Python — export to a standalone Python project",
-    "Re-run last query — execute the same query again",
-]
+_NEXT_STEPS = rendered_next_steps()
 
 _SERVER_INSTRUCTIONS = """\
 You are connected to the dax-query-server, which runs DAX queries against \
@@ -143,56 +176,8 @@ mcp = FastMCP("dax-query-server", instructions=_SERVER_INSTRUCTIONS)
 
 # ── Follow-up menu resource ─────────────────────────────────────────────
 
-_FOLLOWUP_MENU: list[dict[str, Any]] = [
-    {
-        "name": "export_to_csv",
-        "description": "Export query results to a timestamped CSV file.",
-        "required_params": ["connection_name", "query", "output_dir"],
-        "example_usage": 'export_to_csv(connection_name="sales", query="EVALUATE ...", output_dir="./export")',
-    },
-    {
-        "name": "copy_to_clipboard",
-        "description": "Copy query results to the system clipboard as TSV (for Excel) or markdown.",
-        "required_params": ["connection_name", "query"],
-        "example_usage": 'copy_to_clipboard(connection_name="sales", query="EVALUATE ...", format="tsv")',
-    },
-    {
-        "name": "quick_chart",
-        "description": "Generate a chart (bar, line, or pie) from query results.",
-        "required_params": ["connection_name", "query", "chart_type", "x_column", "y_column"],
-        "example_usage": 'quick_chart(connection_name="sales", query="EVALUATE ...", chart_type="bar", x_column="Month", y_column="Revenue")',
-    },
-    {
-        "name": "scaffold_power_query",
-        "description": "Generate Excel Power Query M code to import DAX query results.",
-        "required_params": ["connection_name", "query"],
-        "example_usage": 'scaffold_power_query(connection_name="sales", query="EVALUATE ...", table_name="DAXResults")',
-    },
-    {
-        "name": "scaffold_streamlit_app",
-        "description": "Generate a Streamlit dashboard app for visualizing query results.",
-        "required_params": ["connection_name", "query"],
-        "example_usage": 'scaffold_streamlit_app(connection_name="sales", query="EVALUATE ...", title="Sales Dashboard")',
-    },
-    {
-        "name": "scaffold_python",
-        "description": "Generate a standalone Python project with run_query.py, notebook, and pyproject.toml. Uses save_query_builder under the hood.",
-        "required_params": ["output_dir", "query_text"],
-        "example_usage": 'scaffold_dax_workspace(output_dir="./my_project", query_text="EVALUATE ...", connection_name="sales")',
-    },
-    {
-        "name": "scaffold_dax_studio",
-        "description": "Save the query as .dax and .dax.queryBuilder artifacts for DAX Studio. Uses save_query_builder under the hood.",
-        "required_params": ["query_builder_json", "queries_dir"],
-        "example_usage": 'save_query_builder(query_builder_json="...", queries_dir="./queries")',
-    },
-    {
-        "name": "save_to_workstation",
-        "description": "Save the query to the session workstation for iterative exploration and later export.",
-        "required_params": ["connection_name", "query", "description"],
-        "example_usage": 'save_to_workstation(connection_name="sales", query="EVALUATE ...", description="Monthly revenue")',
-    },
-]
+_FOLLOWUP_MENU: list[dict[str, Any]] = catalog_actions()
+_last_query_context: dict[str, Any] | None = None
 
 
 @mcp.resource("followup://menu")
@@ -202,7 +187,214 @@ def followup_menu() -> str:
     Each item includes name, description, required_params, and example_usage
     so an LLM can suggest appropriate next actions to the user.
     """
-    return _to_json({"actions": _FOLLOWUP_MENU})
+    return _to_json({"actions": catalog_actions()})
+
+
+@mcp.resource("followup://menu/grouped")
+def grouped_followup_menu() -> str:
+    """Return follow-up actions grouped by current-query and query-pack scope."""
+    return _to_json(grouped_catalog_actions())
+
+
+@mcp.resource("followup://recommendations")
+def followup_recommendations() -> str:
+    """Return server-ranked follow-up actions for the latest query result."""
+    return _to_json(_followup_recommendation_payload())
+
+
+def _package_version() -> str:
+    try:
+        return importlib_metadata.version("dax-query-mcp")
+    except importlib_metadata.PackageNotFoundError:
+        pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
+        if not pyproject.exists():
+            return "unknown"
+        for line in pyproject.read_text(encoding="utf-8").splitlines():
+            if line.startswith("version = "):
+                return line.split("=", 1)[1].strip().strip('"')
+        return "unknown"
+
+
+def _git_sha() -> str:
+    repo_root = Path(__file__).resolve().parents[1]
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=repo_root,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+    if result.returncode != 0:
+        return "unknown"
+    return result.stdout.strip() or "unknown"
+
+
+def _file_sha256(path: Path) -> str:
+    try:
+        return sha256(path.read_bytes()).hexdigest()[:16]
+    except OSError:
+        return "unavailable"
+
+
+def _template_hashes() -> dict[str, str]:
+    package_dir = Path(__file__).resolve().parent
+    return {
+        "scaffold_module": _file_sha256(package_dir / "scaffold.py"),
+        "query_pack_export_module": _file_sha256(package_dir / "query_pack_export.py"),
+        "followups_module": _file_sha256(package_dir / "followups.py"),
+        "validated_query_library_module": _file_sha256(package_dir / "validated_query_library.py"),
+    }
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+def server_info(connections_dir: str = DEFAULT_CONNECTIONS_DIR) -> str:
+    """Return package, runtime, path, template, and follow-up diagnostics."""
+    resolved_connections_dir = resolve_connections_dir(connections_dir)
+    grouped = grouped_catalog_actions()
+    grouped_action_count = sum(len(group.get("actions", [])) for group in grouped.get("groups", []))
+    return _to_json({
+        "package": "dax-query-mcp",
+        "version": _package_version(),
+        "git_sha": _git_sha(),
+        "cwd": str(Path.cwd()),
+        "python": {
+            "executable": sys.executable,
+            "version": sys.version.split()[0],
+        },
+        "runtime_path": str(Path(__file__).resolve()),
+        "default_connections_dir": DEFAULT_CONNECTIONS_DIR,
+        "resolved_connections_dir": str(resolved_connections_dir),
+        "resolved_connections_dir_exists": resolved_connections_dir.exists(),
+        "followup_actions": {
+            "rendered_menu_count": len(_NEXT_STEPS),
+            "catalog_action_count": len(catalog_actions()),
+            "group_count": len(grouped.get("groups", [])),
+            "grouped_action_count": grouped_action_count,
+        },
+        "template_hashes": _template_hashes(),
+    })
+
+
+@mcp.prompt
+def explore_connection(connection_name: str = "your_connection") -> str:
+    """Guide an agent through progressive discovery for a new DAX connection."""
+    return (
+        f"Explore the `{connection_name}` semantic model progressively. "
+        "First call get_connection_context(detail='overview'), then use "
+        "get_context_bundle(detail='overview') for structured counts. Only fetch "
+        "get_table_detail, get_measure_detail, get_relationships, or "
+        "get_filter_suggestions when the question needs that scoped context. "
+        "After writing DAX, run it with run_connection_query in the same turn and "
+        "return the complete tool response verbatim."
+    )
+
+
+@mcp.prompt
+def find_measure_for_metric(connection_name: str = "your_connection", metric: str = "revenue") -> str:
+    """Guide measure discovery before writing a metric-focused DAX query."""
+    return (
+        f"Find the best DAX measure for `{metric}` in `{connection_name}`. "
+        "Call search_measures with the metric term, then get_measure_detail for "
+        "the most likely measure. If ambiguity remains, inspect related tables "
+        "with get_context_bundle(detail='schema') or get_table_detail before "
+        "running a DAX query."
+    )
+
+
+@mcp.prompt
+def write_filtered_dax_query(
+    connection_name: str = "your_connection",
+    business_question: str = "show the metric by month",
+    filters: str = "",
+) -> str:
+    """Guide filtered DAX query authoring with context and execution steps."""
+    return (
+        f"Answer this question against `{connection_name}`: {business_question}. "
+        f"Requested filters: {filters or 'none specified'}. Start with "
+        "get_connection_context(detail='overview'), then use search_columns, "
+        "search_measures, and get_filter_suggestions to resolve exact names. "
+        "Write a safe EVALUATE query, execute it with run_connection_query in "
+        "the same turn, and output the complete returned markdown verbatim."
+    )
+
+
+@mcp.prompt
+def build_period_comparison_query(
+    connection_name: str = "your_connection",
+    metric: str = "Total Sales",
+    period: str = "month",
+) -> str:
+    """Guide a period comparison or time-intelligence DAX workflow."""
+    return (
+        f"Build a `{period}` comparison for `{metric}` on `{connection_name}`. "
+        "Use search_measures to confirm the metric, search_columns for calendar "
+        "fields, and get_relationships to verify the fact table filters through "
+        "the calendar table. Then execute the DAX with run_connection_query and "
+        "preserve the returned follow-up menu."
+    )
+
+
+@mcp.prompt
+def export_query_results(connection_name: str = "your_connection", query: str = "EVALUATE ...") -> str:
+    """Guide an end-to-end query-to-artifact follow-up workflow."""
+    return (
+        f"Run this query on `{connection_name}` and turn it into a reusable "
+        f"artifact: {query}. First execute run_connection_query and output the "
+        "complete response. Then use the server-authored follow-up options: "
+        "save_to_workstation for iterative work, quick_chart when numeric columns "
+        "are present, export_to_csv for a file, or scaffold_power_query/"
+        "scaffold_streamlit_app/scaffold_dax_workspace when the user wants a "
+        "refreshable asset."
+    )
+
+
+def _followup_recommendation_payload() -> dict[str, Any]:
+    """Return the latest query context plus ranked follow-up actions."""
+    if _last_query_context is None:
+        return {
+            "has_query_context": False,
+            "message": "No query has been run in this server session yet.",
+            "recommended_actions": [],
+        }
+
+    return {
+        "has_query_context": True,
+        "latest_query": _last_query_context,
+        "recommended_actions": recommend_actions(_last_query_context),
+    }
+
+
+def _capture_last_query_context(
+    *,
+    connection_name: str | None,
+    query: str,
+    summary: dict[str, Any],
+    dataframe: pd.DataFrame,
+    profile: dict[str, Any] | None = None,
+) -> None:
+    """Capture result metadata used by server-authored follow-up recommendations."""
+    global _last_query_context
+    _last_query_context = {
+        "connection_name": connection_name,
+        "query": query,
+        "row_count": summary["row_count"],
+        "column_count": summary.get("column_count", len(summary.get("columns", []))),
+        "columns": list(summary.get("columns", [])),
+        "numeric_columns": _numeric_columns(dataframe),
+        "profile": profile or {},
+        "workstation_count": len(_workstation),
+    }
+
+
+def _numeric_columns(dataframe: pd.DataFrame) -> list[str]:
+    return [
+        str(column)
+        for column in dataframe.columns
+        if pd.api.types.is_numeric_dtype(dataframe[column])
+    ]
 
 
 def validate_dax_query(query: str) -> None:
@@ -212,9 +404,9 @@ def validate_dax_query(query: str) -> None:
     Raises ToolError with a structured JSON payload so the LLM can self-correct.
     """
     upper = query.strip().upper()
-    for prefix in _SAFE_SYSTEM_PREFIXES:
-        if prefix.upper() in upper:
-            return
+    for rowset_ref in _SYSTEM_ROWSET_PATTERN.findall(upper):
+        if not any(rowset_ref.startswith(prefix) for prefix in _SAFE_SYSTEM_PREFIXES):
+            raise admin_query_blocked(blocked_pattern=rowset_ref)
 
     match = _ADMIN_QUERY_PATTERNS.search(query)
     if match:
@@ -493,6 +685,10 @@ def get_schema(
             }
             for f in dd.filters
         ]
+        payload["relationships"] = [
+            _relationship_payload(relationship)
+            for relationship in dd.relationships
+        ]
     else:
         if connection.transport == TRANSPORT_POWERBI_REST:
             payload["message"] = (
@@ -507,6 +703,365 @@ def get_schema(
             )
 
     return _to_json(payload)
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+def get_context_bundle(
+    connection_name: str,
+    detail: str = "overview",
+    connections_dir: str = DEFAULT_CONNECTIONS_DIR,
+    table_names: str = "",
+) -> str:
+    """Return a progressive, structured context bundle for a connection.
+
+    detail="overview" returns compact counts and key names; "schema" returns
+    structured tables, measures, filters, and relationships; "full" also
+    includes available markdown context. Use table_names as a comma-separated
+    allowlist to scope table-heavy schema output.
+    """
+    return _to_json(
+        _context_bundle_payload(
+            connection_name=connection_name,
+            detail=detail,
+            connections_dir=connections_dir,
+            table_names=_split_csv(table_names),
+        )
+    )
+
+
+@mcp.resource("context://{connection_name}/schema")
+def connection_schema_resource(connection_name: str) -> str:
+    """Return schema-level structured context for a connection."""
+    return _to_json(
+        _context_bundle_payload(
+            connection_name=connection_name,
+            detail="schema",
+            connections_dir=DEFAULT_CONNECTIONS_DIR,
+            table_names=[],
+        )
+    )
+
+
+@mcp.resource("context://{connection_name}/relationships")
+def connection_relationships_resource(connection_name: str) -> str:
+    """Return relationship topology from the connection data dictionary."""
+    dd = find_data_dictionary(connection_name, DEFAULT_CONNECTIONS_DIR)
+    relationships = [_relationship_payload(item) for item in dd.relationships] if dd is not None else []
+    return _to_json({
+        "connection_name": connection_name,
+        "found": dd is not None,
+        "relationship_count": len(relationships),
+        "relationships": relationships,
+    })
+
+
+@mcp.resource("context://{connection_name}/data-dictionary")
+def connection_data_dictionary_resource(connection_name: str) -> str:
+    """Return the structured data dictionary resource for a connection."""
+    return get_data_dictionary(connection_name, DEFAULT_CONNECTIONS_DIR)
+
+
+@mcp.resource("context://{connection_name}/validated-queries")
+def connection_validated_queries_resource(connection_name: str) -> str:
+    """Return metadata for known-good query examples for a connection."""
+    return list_validated_queries(connection_name, DEFAULT_CONNECTIONS_DIR)
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+def get_table_detail(
+    connection_name: str,
+    table_name: str,
+    connections_dir: str = DEFAULT_CONNECTIONS_DIR,
+) -> str:
+    """Return detailed structured context for a single table."""
+    dd = find_data_dictionary(connection_name, connections_dir)
+    if dd is None:
+        return _to_json({
+            "connection_name": connection_name,
+            "found": False,
+            "message": "No data dictionary found for this connection.",
+        })
+
+    table = _find_table(dd, table_name)
+    if table is None:
+        raise invalid_params(
+            message=f"Table '{table_name}' not found in data dictionary.",
+            suggestion="Call get_schema or search_columns to discover available tables.",
+            parameter="table_name",
+        )
+
+    relationships = [
+        _relationship_payload(item)
+        for item in dd.relationships
+        if item.from_table == table.name or item.to_table == table.name
+    ]
+    return _to_json({
+        "connection_name": connection_name,
+        "found": True,
+        "table": table.model_dump(),
+        "relationships": relationships,
+    })
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+def get_measure_detail(
+    connection_name: str,
+    measure_name: str,
+    connections_dir: str = DEFAULT_CONNECTIONS_DIR,
+) -> str:
+    """Return detailed structured context for a single measure."""
+    dd = find_data_dictionary(connection_name, connections_dir)
+    if dd is None:
+        return _to_json({
+            "connection_name": connection_name,
+            "found": False,
+            "message": "No data dictionary found for this connection.",
+        })
+
+    measure = _find_measure(dd, measure_name)
+    if measure is None:
+        raise invalid_params(
+            message=f"Measure '{measure_name}' not found in data dictionary.",
+            suggestion="Call search_measures to discover available measures.",
+            parameter="measure_name",
+        )
+    return _to_json({
+        "connection_name": connection_name,
+        "found": True,
+        "measure": measure.model_dump(),
+    })
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+def get_relationships(
+    connection_name: str,
+    table_name: str = "",
+    connections_dir: str = DEFAULT_CONNECTIONS_DIR,
+) -> str:
+    """Return relationship topology, optionally filtered to one table."""
+    dd = find_data_dictionary(connection_name, connections_dir)
+    if dd is None:
+        return _to_json({
+            "connection_name": connection_name,
+            "found": False,
+            "relationship_count": 0,
+            "relationships": [],
+            "message": "No data dictionary found for this connection.",
+        })
+
+    relationships = dd.relationships
+    if table_name.strip():
+        table = _find_table(dd, table_name)
+        if table is None:
+            raise invalid_params(
+                message=f"Table '{table_name}' not found in data dictionary.",
+                suggestion="Call get_schema to discover available tables.",
+                parameter="table_name",
+            )
+        relationships = [
+            item for item in relationships
+            if item.from_table == table.name or item.to_table == table.name
+        ]
+
+    return _to_json({
+        "connection_name": connection_name,
+        "found": True,
+        "relationship_count": len(relationships),
+        "relationships": [_relationship_payload(item) for item in relationships],
+    })
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+def get_filter_suggestions(
+    connection_name: str,
+    filter_name: str = "",
+    connections_dir: str = DEFAULT_CONNECTIONS_DIR,
+) -> str:
+    """Return suggested filters and values from the data dictionary."""
+    dd = find_data_dictionary(connection_name, connections_dir)
+    if dd is None:
+        return _to_json({
+            "connection_name": connection_name,
+            "found": False,
+            "filters": [],
+            "message": "No data dictionary found for this connection.",
+        })
+
+    filters = dd.filters
+    if filter_name.strip():
+        term = filter_name.lower()
+        filters = [
+            item for item in filters
+            if item.name.lower() == term or item.column.lower() == term
+        ]
+
+    return _to_json({
+        "connection_name": connection_name,
+        "found": True,
+        "filter_count": len(filters),
+        "filters": [item.model_dump() for item in filters],
+    })
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+def check_context_staleness(
+    connection_name: str,
+    connections_dir: str = DEFAULT_CONNECTIONS_DIR,
+    command_timeout_seconds: int | None = None,
+) -> str:
+    """Compare live model metadata against the data dictionary for drift."""
+    connection = _get_connection(connection_name, connections_dir)
+    dd = find_data_dictionary(connection_name, connections_dir)
+    payload: dict[str, Any] = {
+        "connection_name": connection_name,
+        "has_data_dictionary": dd is not None,
+        "live_metadata_supported": connection.transport != TRANSPORT_POWERBI_REST,
+    }
+    if dd is None:
+        payload["status"] = "missing_data_dictionary"
+        payload["message"] = "Create or generate a data dictionary before checking staleness."
+        return _to_json(payload)
+    if connection.transport == TRANSPORT_POWERBI_REST:
+        payload["status"] = "not_checked"
+        payload["message"] = (
+            "Power BI REST executeQueries cannot inspect live MDSCHEMA metadata. "
+            "Use an MSOLAP connection to the same model for live staleness checks."
+        )
+        payload["dictionary"] = _dictionary_metadata(dd)
+        return _to_json(payload)
+
+    live = _live_mdschema_metadata(connection, command_timeout_seconds=command_timeout_seconds)
+    dictionary = _dictionary_metadata(dd)
+    comparisons = {
+        key: _compare_name_sets(dictionary[key], live[key])
+        for key in ("tables", "columns", "measures")
+    }
+
+    relationship_probe = _load_tmschema_relationships(connection)
+    if relationship_probe["supported"]:
+        live_relationships = {
+            _relationship_key(RelationshipDef.model_validate(item))
+            for item in relationship_probe["relationships"]
+        }
+        comparisons["relationships"] = _compare_name_sets(dictionary["relationships"], live_relationships)
+    else:
+        comparisons["relationships"] = {
+            "checked": False,
+            "reason": relationship_probe["message"],
+            "missing_in_dictionary": [],
+            "missing_in_live": [],
+        }
+
+    stale = any(
+        comparison.get("missing_in_dictionary") or comparison.get("missing_in_live")
+        for comparison in comparisons.values()
+        if comparison.get("checked", True)
+    )
+    payload.update({
+        "status": "stale" if stale else "current",
+        "dictionary": dictionary,
+        "live": live,
+        "comparisons": comparisons,
+    })
+    return _to_json(payload)
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+def check_ai_readiness(
+    connection_name: str,
+    connections_dir: str = DEFAULT_CONNECTIONS_DIR,
+) -> str:
+    """Assess whether context is descriptive enough for reliable DAX generation."""
+    dd = find_data_dictionary(connection_name, connections_dir)
+    if dd is None:
+        return _to_json({
+            "connection_name": connection_name,
+            "status": "not_ready",
+            "score": 0,
+            "issues": [{"category": "data_dictionary", "message": "No data dictionary found."}],
+        })
+
+    issues: list[dict[str, str]] = []
+    duplicate_columns = _duplicate_column_names(dd)
+    for name, tables in duplicate_columns.items():
+        issues.append({
+            "category": "ambiguous_column",
+            "message": f"Column '{name}' appears in multiple tables: {', '.join(tables)}.",
+        })
+    for table in dd.tables:
+        if not table.description.strip():
+            issues.append({"category": "table_description", "message": f"Table '{table.name}' has no description."})
+        for column in table.columns:
+            if not column.description.strip():
+                issues.append({
+                    "category": "column_description",
+                    "message": f"Column '{table.name}[{column.name}]' has no description.",
+                })
+    for measure in dd.measures:
+        if not measure.expression.strip():
+            issues.append({"category": "measure_expression", "message": f"Measure '{measure.name}' has no expression."})
+        if not measure.description.strip():
+            issues.append({"category": "measure_description", "message": f"Measure '{measure.name}' has no description."})
+    for filter_def in dd.filters:
+        if not filter_def.suggested_values:
+            issues.append({
+                "category": "filter_values",
+                "message": f"Filter '{filter_def.name}' has no suggested values.",
+            })
+    if not dd.relationships:
+        issues.append({
+            "category": "relationships",
+            "message": "No relationships are documented; joins/filter propagation may be ambiguous.",
+        })
+    else:
+        for relationship in dd.relationships:
+            if not relationship.description.strip():
+                issues.append({
+                    "category": "relationship_description",
+                    "message": (
+                        f"Relationship {relationship.from_table}[{relationship.from_column}] -> "
+                        f"{relationship.to_table}[{relationship.to_column}] has no description."
+                    ),
+                })
+
+    score = max(0, 100 - (len(issues) * 5))
+    if score >= 90:
+        status = "ready"
+    elif score >= 70:
+        status = "usable_with_warnings"
+    else:
+        status = "needs_context"
+    return _to_json({
+        "connection_name": connection_name,
+        "status": status,
+        "score": score,
+        "issue_count": len(issues),
+        "issues": issues,
+    })
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+def probe_tmschema_capabilities(
+    connection_name: str,
+    connections_dir: str = DEFAULT_CONNECTIONS_DIR,
+) -> str:
+    """Probe optional TMSCHEMA metadata access without requiring it."""
+    connection = _get_connection(connection_name, connections_dir)
+    if connection.transport == TRANSPORT_POWERBI_REST:
+        return _to_json({
+            "connection_name": connection_name,
+            "supported": False,
+            "message": "Power BI REST executeQueries does not expose TMSCHEMA rowsets.",
+        })
+
+    probe = _load_tmschema_relationships(connection)
+    return _to_json({
+        "connection_name": connection_name,
+        "supported": probe["supported"],
+        "message": probe["message"],
+        "relationship_count": len(probe["relationships"]),
+        "relationships": probe["relationships"],
+    })
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
@@ -540,6 +1095,13 @@ def run_connection_query(
         raise execution_failed(query, exc) from exc
 
     summary = summarize_dataframe(dataframe, preview_rows=preview_rows)
+    _capture_last_query_context(
+        connection_name=connection_name,
+        query=query,
+        summary=summary,
+        dataframe=dataframe,
+        profile=dataframe.attrs.get("profiling") if profile else None,
+    )
     md = _build_query_response_markdown(
         title=f"Query preview for `{connection_name}`",
         summary=summary,
@@ -739,6 +1301,13 @@ def run_named_query(
         )
 
     summary = summarize_dataframe(dataframe, preview_rows=preview_rows)
+    query_config = pipeline.queries.get(query_name)
+    _capture_last_query_context(
+        connection_name=None,
+        query=query_config.dax_query if query_config is not None else query_name,
+        summary=summary,
+        dataframe=dataframe,
+    )
     return _build_query_response_markdown(
         title=f"Query preview for `{query_name}`",
         summary=summary,
@@ -776,6 +1345,13 @@ def run_ad_hoc_query(
         raise execution_failed(query, exc) from exc
 
     summary = summarize_dataframe(dataframe, preview_rows=preview_rows)
+    _capture_last_query_context(
+        connection_name=None,
+        query=query,
+        summary=summary,
+        dataframe=dataframe,
+        profile=dataframe.attrs.get("profiling") if profile else None,
+    )
     md = _build_query_response_markdown(
         title="Query preview",
         summary=summary,
@@ -903,7 +1479,7 @@ def search_columns(
                         "description": description,
                     })
                     seen.add((table_name, col_name))
-    except Exception:
+    except DAXExecutionError:
         pass
 
     # Sort by relevance: exact > starts-with > contains
@@ -939,7 +1515,7 @@ def search_measures(
     Use this when the user asks "which measure calculates revenue?" or similar
     discovery questions.
     """
-    _get_connection(connection_name, connections_dir)
+    connection = _get_connection(connection_name, connections_dir)
 
     dd: DataDictionary | None = None
     dd_path = Path(resolve_connections_dir(connections_dir)) / f"{connection_name}.data_dictionary.yaml"
@@ -947,6 +1523,7 @@ def search_measures(
         dd = load_data_dictionary(dd_path)
 
     matches: list[dict[str, Any]] = []
+    seen: set[str] = set()
     term_lower = search_term.lower()
 
     if dd is not None:
@@ -960,7 +1537,39 @@ def search_measures(
                     "name": measure.name,
                     "expression": expression[:100] + ("..." if len(expression) > 100 else ""),
                     "description": measure.description or "",
+                    "source": "data_dictionary",
                 })
+                seen.add(measure.name)
+
+    try:
+        if connection.transport != TRANSPORT_POWERBI_REST:
+            dataframe = _execute_connection_dataframe(
+                connection,
+                (
+                    "SELECT MEASURE_NAME, MEASURE_UNIQUE_NAME, DESCRIPTION "
+                    "FROM $SYSTEM.MDSCHEMA_MEASURES"
+                ),
+            )
+            for _, row in dataframe.iterrows():
+                measure_name = str(row.get("MEASURE_NAME", "") or "")
+                if not measure_name or measure_name in seen:
+                    continue
+
+                expression = str(row.get("MEASURE_UNIQUE_NAME", "") or "")
+                description = str(row.get("DESCRIPTION", "") or "")
+                name_lower = measure_name.lower()
+                expr_lower = expression.lower()
+                desc_lower = description.lower()
+                if term_lower in name_lower or term_lower in desc_lower or term_lower in expr_lower:
+                    matches.append({
+                        "name": measure_name,
+                        "expression": expression[:100] + ("..." if len(expression) > 100 else ""),
+                        "description": description,
+                        "source": "live_mdschema",
+                    })
+                    seen.add(measure_name)
+    except DAXExecutionError:
+        pass
 
     def _relevance(m: dict[str, Any]) -> tuple[int, str]:
         name_lower = m["name"].lower()
@@ -972,6 +1581,413 @@ def search_measures(
 
     matches.sort(key=_relevance)
     return _to_json(matches[:max_results])
+
+
+def _split_csv(value: str) -> list[str]:
+    return [part.strip() for part in value.split(",") if part.strip()]
+
+
+def _relationship_payload(relationship: RelationshipDef) -> dict[str, Any]:
+    payload = relationship.model_dump()
+    payload["from"] = f"{relationship.from_table}[{relationship.from_column}]"
+    payload["to"] = f"{relationship.to_table}[{relationship.to_column}]"
+    return payload
+
+
+def _relationship_key(relationship: RelationshipDef) -> str:
+    return (
+        f"{relationship.from_table}[{relationship.from_column}]"
+        f"->{relationship.to_table}[{relationship.to_column}]"
+    )
+
+
+def _validated_query_context_payload(
+    connection_name: str,
+    connections_dir: str,
+    *,
+    limit: int = 5,
+) -> dict[str, Any]:
+    resolved_dir = resolve_connections_dir(connections_dir)
+    library_dir = validated_query_library_dir(resolved_dir, connection_name)
+    entries = load_validated_query_library(resolved_dir, connection_name)
+    return {
+        "count": len(entries),
+        "library_dir": str(library_dir),
+        "queries": [
+            summarize_validated_query_entry(entry, include_query_text=False)
+            for entry in entries[:limit]
+        ],
+        "note": (
+            "Validated query context is metadata-only here. Use search_validated_queries "
+            "or list_validated_queries(include_dax=True) when you need the DAX text."
+        ),
+    }
+
+
+def _context_bundle_payload(
+    *,
+    connection_name: str,
+    detail: str,
+    connections_dir: str,
+    table_names: list[str],
+) -> dict[str, Any]:
+    normalized_detail = detail.lower()
+    if normalized_detail not in {"overview", "schema", "full"}:
+        raise invalid_params(
+            message=f"Unsupported detail '{detail}'.",
+            suggestion='Use detail="overview", "schema", or "full".',
+            parameter="detail",
+        )
+
+    connection = _get_connection(connection_name, connections_dir)
+    dd = find_data_dictionary(connection_name, connections_dir)
+    validated_queries = _validated_query_context_payload(connection_name, connections_dir)
+    payload: dict[str, Any] = {
+        "connection_name": connection_name,
+        "description": connection.description,
+        "context_level": normalized_detail,
+        "has_data_dictionary": dd is not None,
+        "sources": {
+            "overview_markdown": connection.overview_path,
+            "full_context_markdown": connection.context_path,
+            "data_dictionary": str(Path(resolve_connections_dir(connections_dir)) / f"{connection_name}.data_dictionary.yaml")
+            if dd is not None
+            else None,
+            "validated_query_library": validated_queries["library_dir"],
+        },
+        "next_levels": _next_context_levels(normalized_detail),
+        "validated_queries": validated_queries,
+    }
+    if dd is None:
+        payload["message"] = "No data dictionary found; use get_connection_context or generate_data_dictionary next."
+        return payload
+
+    table_filter = {name.lower() for name in table_names}
+    tables = [table for table in dd.tables if not table_filter or table.name.lower() in table_filter]
+    payload["counts"] = {
+        "tables": len(dd.tables),
+        "measures": len(dd.measures),
+        "filters": len(dd.filters),
+        "relationships": len(dd.relationships),
+        "validated_queries": validated_queries["count"],
+    }
+
+    if normalized_detail == "overview":
+        payload["tables"] = [
+            {"name": table.name, "description": table.description, "column_count": len(table.columns)}
+            for table in tables
+        ]
+        payload["measures"] = [
+            {"name": measure.name, "description": measure.description}
+            for measure in dd.measures
+        ]
+        payload["filters"] = [
+            {"name": filter_def.name, "column": filter_def.column, "description": filter_def.description}
+            for filter_def in dd.filters
+        ]
+        payload["relationships"] = [_relationship_payload(item) for item in dd.relationships]
+        return payload
+
+    payload["tables"] = [table.model_dump() for table in tables]
+    payload["measures"] = [measure.model_dump() for measure in dd.measures]
+    payload["filters"] = [filter_def.model_dump() for filter_def in dd.filters]
+    payload["relationships"] = [_relationship_payload(item) for item in dd.relationships]
+    if normalized_detail == "full":
+        payload["overview_markdown"] = connection.overview_markdown or ""
+        payload["context_markdown"] = connection.context_markdown or ""
+    return payload
+
+
+def _next_context_levels(detail: str) -> list[str]:
+    if detail == "overview":
+        return ["schema", "full"]
+    if detail == "schema":
+        return ["full"]
+    return []
+
+
+def _find_table(dd: DataDictionary, table_name: str) -> TableDef | None:
+    term = table_name.lower()
+    return next((table for table in dd.tables if table.name.lower() == term), None)
+
+
+def _find_measure(dd: DataDictionary, measure_name: str) -> MeasureDef | None:
+    term = measure_name.lower()
+    return next((measure for measure in dd.measures if measure.name.lower() == term), None)
+
+
+def _dictionary_metadata(dd: DataDictionary) -> dict[str, list[str]]:
+    return {
+        "tables": sorted(table.name for table in dd.tables),
+        "columns": sorted(
+            f"{table.name}[{column.name}]"
+            for table in dd.tables
+            for column in table.columns
+        ),
+        "measures": sorted(measure.name for measure in dd.measures),
+        "relationships": sorted(_relationship_key(item) for item in dd.relationships),
+    }
+
+
+def _live_mdschema_metadata(
+    connection: Any,
+    *,
+    command_timeout_seconds: int | None,
+) -> dict[str, list[str]]:
+    queries = {
+        "dimensions": "SELECT * FROM $SYSTEM.MDSCHEMA_DIMENSIONS",
+        "levels": "SELECT * FROM $SYSTEM.MDSCHEMA_LEVELS",
+        "measures": "SELECT * FROM $SYSTEM.MDSCHEMA_MEASURES",
+    }
+    raw: dict[str, pd.DataFrame] = {}
+    for key, query in queries.items():
+        try:
+            raw[key] = _execute_connection_dataframe(
+                connection,
+                query,
+                command_timeout_seconds=command_timeout_seconds,
+            )
+        except DAXExecutionError as exc:
+            raise execution_failed(query, exc) from exc
+    return {
+        "tables": sorted(_table_names_from_dimensions(raw["dimensions"])),
+        "columns": sorted(
+            f"{table_name}[{column.name}]"
+            for table_name, column in _columns_from_levels(raw["levels"])
+        ),
+        "measures": sorted(
+            str(row.get("MEASURE_NAME", "") or "")
+            for _, row in raw["measures"].iterrows()
+            if str(row.get("MEASURE_NAME", "") or "").strip()
+        ),
+    }
+
+
+def _table_names_from_dimensions(dataframe: pd.DataFrame) -> set[str]:
+    if "DIMENSION_NAME" not in dataframe.columns:
+        return set()
+    return {
+        str(value)
+        for value in dataframe["DIMENSION_NAME"].dropna().unique()
+        if str(value).strip()
+    }
+
+
+def _columns_from_levels(dataframe: pd.DataFrame) -> list[tuple[str, ColumnDef]]:
+    columns: list[tuple[str, ColumnDef]] = []
+    for _, row in dataframe.iterrows():
+        column_name = str(row.get("LEVEL_NAME", "") or "").strip()
+        if not column_name or column_name.lower() in {"(all)", "all"}:
+            continue
+        table_name = _table_name_from_level_row(row)
+        if not table_name:
+            continue
+        data_type = _mdschema_level_data_type(row)
+        columns.append((
+            table_name,
+            ColumnDef(
+                name=column_name,
+                data_type=data_type,
+                description=str(row.get("DESCRIPTION", "") or ""),
+            ),
+        ))
+    return columns
+
+
+def _table_name_from_level_row(row: Any) -> str:
+    value = str(row.get("DIMENSION_UNIQUE_NAME", "") or "").strip()
+    if value:
+        return _clean_mdx_name(value)
+    hierarchy = str(row.get("HIERARCHY_UNIQUE_NAME", "") or "").strip()
+    if hierarchy:
+        first_part = hierarchy.split(".", maxsplit=1)[0]
+        return _clean_mdx_name(first_part)
+    return ""
+
+
+def _clean_mdx_name(value: str) -> str:
+    text = value.strip()
+    if text.startswith("[") and "]" in text:
+        text = text[1:text.index("]")]
+    return text.strip("[]")
+
+
+def _mdschema_level_data_type(row: Any) -> str:
+    for key in ("DATA_TYPE", "LEVEL_DBTYPE", "LEVEL_TYPE"):
+        value = row.get(key, None)
+        if value is not None and str(value).strip() and str(value) != "nan":
+            return str(value)
+    return "string"
+
+
+def _compare_name_sets(dictionary_values: Any, live_values: Any) -> dict[str, Any]:
+    dictionary_set = {str(value) for value in dictionary_values}
+    live_set = {str(value) for value in live_values}
+    return {
+        "checked": True,
+        "dictionary_count": len(dictionary_set),
+        "live_count": len(live_set),
+        "missing_in_dictionary": sorted(live_set - dictionary_set),
+        "missing_in_live": sorted(dictionary_set - live_set),
+    }
+
+
+def _duplicate_column_names(dd: DataDictionary) -> dict[str, list[str]]:
+    locations: dict[str, list[str]] = {}
+    display_names: dict[str, str] = {}
+    for table in dd.tables:
+        for column in table.columns:
+            key = column.name.lower()
+            display_names.setdefault(key, column.name)
+            locations.setdefault(key, []).append(table.name)
+    return {
+        display_names[key]: sorted(set(tables))
+        for key, tables in locations.items()
+        if len(set(tables)) > 1
+    }
+
+
+def _load_tmschema_relationships(connection: Any) -> dict[str, Any]:
+    try:
+        relationships_df = _execute_connection_dataframe(
+            connection,
+            "SELECT * FROM $SYSTEM.TMSCHEMA_RELATIONSHIPS",
+        )
+    except DAXExecutionError as exc:
+        return {
+            "supported": False,
+            "message": f"TMSCHEMA relationship metadata unavailable: {exc}",
+            "relationships": [],
+        }
+
+    try:
+        tables_df = _execute_connection_dataframe(connection, "SELECT * FROM $SYSTEM.TMSCHEMA_TABLES")
+        columns_df = _execute_connection_dataframe(connection, "SELECT * FROM $SYSTEM.TMSCHEMA_COLUMNS")
+    except DAXExecutionError:
+        tables_df = pd.DataFrame()
+        columns_df = pd.DataFrame()
+
+    relationships = _relationships_from_tmschema(relationships_df, tables_df, columns_df)
+    message = (
+        "TMSCHEMA relationship metadata is available."
+        if relationships
+        else "TMSCHEMA_RELATIONSHIPS returned no usable relationship rows."
+    )
+    return {
+        "supported": True,
+        "message": message,
+        "relationships": [relationship.model_dump() for relationship in relationships],
+    }
+
+
+def _relationships_from_tmschema(
+    relationships_df: pd.DataFrame,
+    tables_df: pd.DataFrame,
+    columns_df: pd.DataFrame,
+) -> list[RelationshipDef]:
+    table_names = _tmschema_table_name_map(tables_df)
+    column_lookup = _tmschema_column_lookup(columns_df, table_names)
+    relationships: list[RelationshipDef] = []
+    for _, row in relationships_df.iterrows():
+        from_column_info = column_lookup.get(str(_first_existing(row, ("FromColumnID", "FROM_COLUMN_ID"))))
+        to_column_info = column_lookup.get(str(_first_existing(row, ("ToColumnID", "TO_COLUMN_ID"))))
+        from_table = str(_first_existing(row, ("FromTable", "FromTableName", "FROM_TABLE", "FROM_TABLE_NAME")) or "")
+        from_column = str(_first_existing(row, ("FromColumn", "FromColumnName", "FROM_COLUMN", "FROM_COLUMN_NAME")) or "")
+        to_table = str(_first_existing(row, ("ToTable", "ToTableName", "TO_TABLE", "TO_TABLE_NAME")) or "")
+        to_column = str(_first_existing(row, ("ToColumn", "ToColumnName", "TO_COLUMN", "TO_COLUMN_NAME")) or "")
+
+        if from_column_info is not None:
+            from_table = from_table or from_column_info["table"]
+            from_column = from_column or from_column_info["column"]
+        if to_column_info is not None:
+            to_table = to_table or to_column_info["table"]
+            to_column = to_column or to_column_info["column"]
+
+        from_table_id = _first_existing(row, ("FromTableID", "FROM_TABLE_ID"))
+        to_table_id = _first_existing(row, ("ToTableID", "TO_TABLE_ID"))
+        from_table = from_table or table_names.get(str(from_table_id), "")
+        to_table = to_table or table_names.get(str(to_table_id), "")
+
+        if not all((from_table, from_column, to_table, to_column)):
+            continue
+        relationships.append(
+            RelationshipDef(
+                from_table=from_table,
+                from_column=from_column,
+                to_table=to_table,
+                to_column=to_column,
+                cardinality=_cardinality_from_tmschema(row),
+                cross_filter_direction=_cross_filter_from_tmschema(row),
+                is_active=_coerce_bool(_first_existing(row, ("IsActive", "IS_ACTIVE")), default=True),
+                description=str(_first_existing(row, ("Description", "DESCRIPTION")) or ""),
+                source="tmschema",
+                confidence="high",
+            )
+        )
+    return relationships
+
+
+def _tmschema_table_name_map(dataframe: pd.DataFrame) -> dict[str, str]:
+    if dataframe.empty or "ID" not in dataframe.columns:
+        return {}
+    return {
+        str(row.get("ID")): str(_first_existing(row, ("Name", "ExplicitName", "InferredName")) or "")
+        for _, row in dataframe.iterrows()
+    }
+
+
+def _tmschema_column_lookup(dataframe: pd.DataFrame, table_names: dict[str, str]) -> dict[str, dict[str, str]]:
+    if dataframe.empty or "ID" not in dataframe.columns:
+        return {}
+    lookup: dict[str, dict[str, str]] = {}
+    for _, row in dataframe.iterrows():
+        column_id = str(row.get("ID"))
+        table_id = str(_first_existing(row, ("TableID", "TABLE_ID")) or "")
+        column_name = str(_first_existing(row, ("ExplicitName", "InferredName", "Name")) or "")
+        if column_id and column_name:
+            lookup[column_id] = {"table": table_names.get(table_id, ""), "column": column_name}
+    return lookup
+
+
+def _first_existing(row: Any, names: tuple[str, ...]) -> Any:
+    for name in names:
+        if name in row:
+            value = row.get(name)
+            if value is not None and not pd.isna(value) and str(value).strip():
+                return value
+    return None
+
+
+def _coerce_bool(value: Any, *, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"true", "1", "yes", "active"}:
+        return True
+    if text in {"false", "0", "no", "inactive"}:
+        return False
+    return default
+
+
+def _cardinality_from_tmschema(row: Any) -> str:
+    from_cardinality = str(_first_existing(row, ("FromCardinality", "FROM_CARDINALITY")) or "").lower()
+    to_cardinality = str(_first_existing(row, ("ToCardinality", "TO_CARDINALITY")) or "").lower()
+    if "many" in from_cardinality and "one" in to_cardinality:
+        return "many-to-one"
+    if "one" in from_cardinality and "many" in to_cardinality:
+        return "one-to-many"
+    if "one" in from_cardinality and "one" in to_cardinality:
+        return "one-to-one"
+    if "many" in from_cardinality and "many" in to_cardinality:
+        return "many-to-many"
+    return "many-to-one"
+
+
+def _cross_filter_from_tmschema(row: Any) -> str:
+    value = str(_first_existing(row, ("CrossFilteringBehavior", "CROSS_FILTERING_BEHAVIOR")) or "").lower()
+    return "both" if "both" in value else "single"
 
 
 def summarize_dataframe(
@@ -1134,6 +2150,36 @@ def scaffold_dax_workspace(
         **connection_kwargs,
         overwrite=True,
     )
+    query_filename = result["query_filename"]
+    query_id = slugify_query_id(Path(query_filename).stem or query_name)
+    pack_connection_name = connection_name or "default"
+    pack = QueryPack(
+        name=result["project_name"],
+        description="Single-query workspace exported as a one-query pack for durable follow-up workflows.",
+        queries=[
+            QueryPackEntry(
+                id=query_id,
+                display_name=query_id,
+                connection_name=pack_connection_name,
+                file=f"queries/{query_filename}",
+                description="One-off query scaffolded by dax-query-mcp.",
+                tags=["one-off"],
+                outputs=QueryOutputs(table_name=query_id),
+                query_text=query_text,
+            )
+        ],
+    )
+    pack_result = save_query_pack(pack, output_dir, overwrite=True)
+    pack_artifacts = write_query_pack_artifacts(pack, output_dir, output_dir, connections_dir)
+    result["files_created"].extend(pack_result["files_created"])
+    result["files_created"].extend(pack_artifacts)
+    result["files_created"] = list(dict.fromkeys(result["files_created"]))
+    result["manifest_path"] = str(Path(output_dir) / "pack.yaml")
+    result["pack_query_id"] = query_id
+    result["next_steps"] = (
+        f"{result['next_steps']}\n"
+        f"Multi-query-compatible runner: cd {output_dir} && uv run run_queries.py --list"
+    )
     return _to_json(result)
 
 
@@ -1143,61 +2189,45 @@ def scaffold_streamlit_app(
     query: str,
     title: str = "DAX Query Results",
     output_path: str = "",
+    connections_dir: str = DEFAULT_CONNECTIONS_DIR,
 ) -> str:
     """Generate a Streamlit Python app for visualizing DAX query results.
 
-    Creates a standalone .py file that uses Streamlit to display a data table
-    and an optional bar chart for numeric columns.
+    Creates a standalone .py file that uses Streamlit to execute the embedded
+    DAX query, display results, filter columns, build charts/pivots, download
+    artifacts, and drag/drop CSV or JSON exports for offline exploration.
 
     Parameters:
         connection_name: Name of the DAX connection (embedded in the generated app).
         query: The DAX query to embed in the generated app.
         title: Page title shown in the Streamlit app.
         output_path: If provided, write the generated code to this file path.
+        connections_dir: Directory containing named DAX connection YAML files.
     """
-    import textwrap
-
-    code = textwrap.dedent(f'''\
-        """Streamlit app for visualizing DAX query results.
-
-        Run with: streamlit run {output_path or "app.py"}
-        """
-
-        import streamlit as st
-        import pandas as pd
-
-        st.set_page_config(page_title={title!r}, layout="wide")
-        st.title({title!r})
-
-        CONNECTION_NAME = {connection_name!r}
-        DAX_QUERY = {query!r}
-
-        st.subheader("DAX Query")
-        st.code(DAX_QUERY, language="dax")
-
-        # -- Replace this section with live query execution if desired --
-        # from dax_query_mcp.executor import dax_to_pandas
-        # df = dax_to_pandas(dax_query=DAX_QUERY, conn_str="YOUR_CONNECTION_STRING")
-        st.info(
-            f"Connection: **{{CONNECTION_NAME}}** — "
-            "replace the sample DataFrame below with a live call to dax_to_pandas()."
-        )
-        df = pd.DataFrame({{"Column": ["sample"], "Value": [0]}})
-        # -- End sample section --
-
-        st.subheader("Data")
-        st.dataframe(df, use_container_width=True)
-
-        numeric_cols = df.select_dtypes(include="number").columns.tolist()
-        if numeric_cols:
-            st.subheader("Chart")
-            st.bar_chart(df[numeric_cols])
-    ''')
+    connection = _get_connection(connection_name, connections_dir)
+    connection_config = build_scaffold_connection_config(
+        connection_string=connection.connection_string,
+        transport=connection.transport,
+        dataset_id=connection.dataset_id,
+        auth_mode=connection.auth_mode,
+        access_token_env=connection.access_token_env,
+        api_base_url=connection.api_base_url,
+        impersonated_user_name=connection.impersonated_user_name,
+        connection_timeout_seconds=connection.connection_timeout_seconds,
+        command_timeout_seconds=connection.command_timeout_seconds,
+        max_rows=connection.max_rows,
+    )
+    code = render_streamlit_single_query_app(
+        connection_name=connection_name,
+        connection_config=connection_config,
+        query=query,
+        title=title,
+    )
 
     payload: dict[str, Any] = {
         "code": code,
         "instructions": (
-            f"Run the app with: streamlit run "
+            f"Run the live explorer with: streamlit run "
             f"{output_path or 'app.py'}"
         ),
     }
@@ -1277,21 +2307,17 @@ def scaffold_power_query(
             connection_name=connection_name,
             transport=connection.transport,
         )
-    conn_str = connection.connection_string.strip()
-
-    escaped_query = query.replace('"', '""')
-
-    m_code = (
-        "let\n"
-        "    // Step 1 — Connect to Analysis Services\n"
-        f'    Source = AnalysisServices.Database("{conn_str}"),\n'
-        "\n"
-        "    // Step 2 — Run the DAX query\n"
-        f'    Result = Value.NativeQuery(Source, "{escaped_query}")\n'
-        "in\n"
-        "    // Step 3 — Return the result table\n"
-        "    Result"
-    )
+    try:
+        m_code = power_query_m_from_connection(connection.connection_string, query)
+    except ValueError as exc:
+        raise invalid_params(
+            message=str(exc),
+            suggestion=(
+                "Use an MSOLAP connection string with Data Source and Initial Catalog, "
+                "and avoid user/password/effective-user properties in shareable Power Query artifacts."
+            ),
+            connection_name=connection_name,
+        ) from exc
 
     payload = {
         "m_code": m_code,
@@ -1387,9 +2413,10 @@ def generate_data_dictionary(
 ) -> str:
     """Generate a data dictionary YAML from live schema inspection.
 
-    Queries MDSCHEMA_MEASUREGROUPS, MDSCHEMA_MEASURES, and
-    MDSCHEMA_DIMENSIONS to discover tables and measures, then builds a
-    DataDictionary scaffold with empty descriptions for the user to fill in.
+    Queries MDSCHEMA_MEASUREGROUPS, MDSCHEMA_MEASURES, MDSCHEMA_DIMENSIONS,
+    and MDSCHEMA_LEVELS to discover tables, columns, and measures, then builds
+    a DataDictionary scaffold. If optional TMSCHEMA rowsets are available, it
+    also includes high-confidence relationship metadata.
 
     Required parameters: connection_name.
     Optional parameters: connections_dir, output_path — when provided the
@@ -1421,6 +2448,7 @@ def generate_data_dictionary(
         "measuregroups": "SELECT * FROM $SYSTEM.MDSCHEMA_MEASUREGROUPS",
         "measures": "SELECT * FROM $SYSTEM.MDSCHEMA_MEASURES",
         "dimensions": "SELECT * FROM $SYSTEM.MDSCHEMA_DIMENSIONS",
+        "levels": "SELECT * FROM $SYSTEM.MDSCHEMA_LEVELS",
     }
 
     raw: dict[str, pd.DataFrame] = {}
@@ -1430,14 +2458,27 @@ def generate_data_dictionary(
         except DAXExecutionError as exc:
             raise execution_failed(query, exc) from exc
 
-    # Build tables from MDSCHEMA_DIMENSIONS
-    tables: list[TableDef] = []
+    # Build tables from MDSCHEMA_DIMENSIONS and enrich columns from MDSCHEMA_LEVELS.
+    table_map: dict[str, TableDef] = {}
     if "dimensions" in raw:
         dim_df = raw["dimensions"]
         dim_name_col = "DIMENSION_NAME"
         if dim_name_col in dim_df.columns:
-            for dim_name in dim_df[dim_name_col].unique():
-                tables.append(TableDef(name=str(dim_name), description=""))
+            for _, row in dim_df.iterrows():
+                dim_name = str(row[dim_name_col])
+                description = str(row.get("DESCRIPTION", "") or "")
+                table_map.setdefault(dim_name, TableDef(name=dim_name, description=description))
+
+    if "levels" in raw:
+        seen_columns: set[tuple[str, str]] = set()
+        for table_name, column in _columns_from_levels(raw["levels"]):
+            key = (table_name, column.name)
+            if key in seen_columns:
+                continue
+            seen_columns.add(key)
+            table = table_map.setdefault(table_name, TableDef(name=table_name, description=""))
+            table.columns.append(column)
+    tables = list(table_map.values())
 
     # Build measures from MDSCHEMA_MEASURES
     measures: list[MeasureDef] = []
@@ -1448,11 +2489,24 @@ def generate_data_dictionary(
         if name_col in meas_df.columns:
             for _, row in meas_df.iterrows():
                 expression = str(row.get(unique_col, "")) if unique_col in meas_df.columns else ""
+                description = str(row.get("DESCRIPTION", "") or "")
                 measures.append(
-                    MeasureDef(name=str(row[name_col]), expression=expression, description="")
+                    MeasureDef(name=str(row[name_col]), expression=expression, description=description)
                 )
 
-    dd = DataDictionary(version="1.0", tables=tables, measures=measures, filters=[])
+    relationship_probe = _load_tmschema_relationships(connection)
+    relationships = [
+        RelationshipDef.model_validate(item)
+        for item in relationship_probe["relationships"]
+    ] if relationship_probe["supported"] else []
+
+    dd = DataDictionary(
+        version="1.0",
+        tables=tables,
+        measures=measures,
+        filters=[],
+        relationships=relationships,
+    )
 
     yaml_content = yaml.dump(
         dd.model_dump(exclude_defaults=False),
@@ -1465,6 +2519,9 @@ def generate_data_dictionary(
         "yaml_content": yaml_content,
         "table_count": len(tables),
         "measure_count": len(measures),
+        "relationship_count": len(relationships),
+        "relationship_source": "tmschema" if relationships else "unavailable",
+        "relationship_message": relationship_probe["message"],
     }
 
     if output_path:
@@ -1476,6 +2533,45 @@ def generate_data_dictionary(
     return _to_json(payload)
 
 
+@mcp.tool(annotations={"readOnlyHint": True})
+def diff_data_dictionary(
+    base_path: str,
+    candidate_path: str,
+) -> str:
+    """Compare two data dictionary YAML files and return added/removed metadata."""
+    base = load_data_dictionary(base_path)
+    candidate = load_data_dictionary(candidate_path)
+    return _to_json(diff_data_dictionaries(base, candidate))
+
+
+@mcp.tool()
+def merge_data_dictionary(
+    generated_path: str,
+    curated_path: str,
+    output_path: str = "",
+) -> str:
+    """Merge regenerated metadata with curated descriptions and optionally write YAML."""
+    generated = load_data_dictionary(generated_path)
+    curated = load_data_dictionary(curated_path)
+    merged = merge_data_dictionaries(generated, curated)
+    payload: dict[str, Any] = {"data_dictionary": merged.model_dump(exclude_defaults=True)}
+    if output_path:
+        save_data_dictionary(merged, output_path)
+        payload["file_path"] = output_path
+    return _to_json(payload)
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+def review_data_dictionary_update(
+    curated_path: str,
+    generated_path: str,
+) -> str:
+    """Preview diff and merged output before replacing a curated data dictionary."""
+    curated = load_data_dictionary(curated_path)
+    generated = load_data_dictionary(generated_path)
+    return _to_json(build_data_dictionary_update_review(curated, generated))
+
+
 # ── Workstation helpers ──────────────────────────────────────────────
 
 # ── In-memory workstation (ephemeral per server session) ─────────────
@@ -1484,9 +2580,389 @@ _workstation: dict[str, dict[str, Any]] = {}
 
 def _slugify(text: str) -> str:
     """Convert a description to a filesystem-safe slug."""
-    slug = re.sub(r"[^\w\s-]", "", text.lower())
-    slug = re.sub(r"[\s_-]+", "_", slug).strip("_")
-    return slug or "query"
+    return slugify_query_id(text)
+
+
+def _parse_tag_list(tags: str | list[str] | None) -> list[str]:
+    if tags is None:
+        return []
+    if isinstance(tags, str):
+        return [tag.strip() for tag in tags.split(",") if tag.strip()]
+    return [str(tag).strip() for tag in tags if str(tag).strip()]
+
+
+def _parse_json_object_param(
+    raw_json: str,
+    *,
+    parameter: str,
+    example: str,
+) -> dict[str, Any]:
+    if not raw_json.strip():
+        return {}
+    try:
+        raw = json.loads(raw_json)
+    except json.JSONDecodeError as exc:
+        raise invalid_params(
+            message=f"{parameter} must be a JSON object.",
+            suggestion=f"Use a JSON object like {example}.",
+            parameter=parameter,
+        ) from exc
+    if not isinstance(raw, dict):
+        raise invalid_params(
+            message=f"{parameter} must be a JSON object.",
+            suggestion=f"Use a JSON object like {example}.",
+            parameter=parameter,
+        )
+    return raw
+
+
+def _parse_query_parameters_param(raw_json: str, *, parameter: str = "parameters_json") -> dict[str, QueryParameter]:
+    raw_parameters = _parse_json_object_param(
+        raw_json,
+        parameter=parameter,
+        example='{"fiscal_year": {"type": "text", "default": "FY26"}}',
+    )
+    try:
+        return {
+            str(name): QueryParameter.from_raw(definition)
+            for name, definition in raw_parameters.items()
+        }
+    except ValueError as exc:
+        raise invalid_params(
+            message=str(exc),
+            suggestion="Use supported parameter types: text, number, date, boolean, list[text].",
+            parameter=parameter,
+        ) from exc
+
+
+def _workstation_to_query_pack(name: str = "workstation", description: str = "DAX workstation exported query pack") -> QueryPack:
+    entries = [
+        QueryPackEntry(
+            id=entry["query_name"],
+            display_name=entry["query_name"],
+            connection_name=entry["connection_name"],
+            file=f"queries/{entry['query_name']}.dax",
+            description=entry.get("description", ""),
+            tags=_parse_tag_list(entry.get("tags")),
+            query_text=entry.get("query", ""),
+            source={
+                "kind": "workstation",
+                "saved_at": entry.get("saved_at", ""),
+            },
+        )
+        for entry in _workstation.values()
+    ]
+    return QueryPack(name=name, description=description, queries=entries)
+
+
+def _load_query_pack_and_root(pack_path: str | Path) -> tuple[QueryPack, Path]:
+    manifest_path = Path(pack_path)
+    if manifest_path.is_dir():
+        root = manifest_path
+    else:
+        root = manifest_path.parent
+    return load_query_pack(manifest_path), root
+
+
+def _dry_run_query_pack(
+    pack: QueryPack,
+    root: Path,
+    connections: dict[str, Any],
+    *,
+    max_rows: int,
+    continue_on_error: bool,
+) -> dict[str, Any]:
+    results: list[dict[str, Any]] = []
+    for entry in pack.queries:
+        item: dict[str, Any] = {
+            "id": entry.id,
+            "connection_name": entry.connection_name,
+            "max_rows": max_rows,
+        }
+        connection = connections.get(entry.connection_name)
+        if connection is None:
+            item.update({
+                "status": "failed",
+                "error": f"Unknown connection '{entry.connection_name}'.",
+            })
+            results.append(item)
+            if not continue_on_error:
+                break
+            continue
+
+        try:
+            query_text = read_query_text(root, entry)
+            rendered_query = render_dax_template(query_text, entry.parameters, {})
+            validate_dax_query(rendered_query)
+            dataframe = _execute_connection_dataframe(connection, rendered_query, max_rows=max_rows)
+        except (DAXExecutionError, ValueError) as exc:
+            item.update({
+                "status": "failed",
+                "error": str(exc),
+            })
+            results.append(item)
+            if not continue_on_error:
+                break
+            continue
+
+        item.update({
+            "status": "passed",
+            "row_count": int(len(dataframe)),
+            "columns": [str(column) for column in dataframe.columns],
+        })
+        results.append(item)
+
+    failed_count = sum(1 for item in results if item["status"] != "passed")
+    return {
+        "enabled": True,
+        "max_rows": max_rows,
+        "continue_on_error": continue_on_error,
+        "query_count": len(results),
+        "success_count": len(results) - failed_count,
+        "passed_count": len(results) - failed_count,
+        "failure_count": failed_count,
+        "failed_count": failed_count,
+        "queries": results,
+    }
+
+
+@mcp.tool()
+def save_validated_query(
+    connection_name: str,
+    query: str,
+    description: str,
+    query_id: str = "",
+    display_name: str = "",
+    tags: str = "",
+    parameters_json: str = "",
+    sample_parameters_json: str = "",
+    table_name: str = "",
+    overwrite: bool = False,
+    connections_dir: str = DEFAULT_CONNECTIONS_DIR,
+) -> str:
+    """Save a known-good DAX pattern to a connection-scoped validated query library.
+
+    This creates two files under ``<connection_name>.validated_queries/``:
+    a metadata YAML file and a sibling .dax file. Validation metadata is not
+    marked passed until validate_query_library executes the query successfully.
+    """
+    _get_connection(connection_name, connections_dir)
+    validate_dax_query(query)
+    stable_id = slugify_query_id(query_id or display_name or description)
+    parameters = _parse_query_parameters_param(parameters_json)
+    sample_parameters = _parse_json_object_param(
+        sample_parameters_json,
+        parameter="sample_parameters_json",
+        example='{"fiscal_year": "FY26"}',
+    )
+    entry = ValidatedQueryEntry(
+        id=stable_id,
+        display_name=display_name or stable_id,
+        connection_name=connection_name,
+        file=f"{stable_id}.dax",
+        description=description,
+        tags=_parse_tag_list(tags),
+        parameters=parameters,
+        sample_parameters=sample_parameters,
+        outputs=QueryOutputs(table_name=table_name or stable_id),
+        query_text=query,
+        source={"kind": "mcp_tool", "tool": "save_validated_query"},
+    )
+    try:
+        result = save_validated_query_entry(
+            entry,
+            resolve_connections_dir(connections_dir),
+            overwrite=overwrite,
+        )
+    except (FileExistsError, ValueError) as exc:
+        raise invalid_params(
+            message=str(exc),
+            suggestion="Choose a different query_id or call save_validated_query with overwrite=True.",
+            parameter="query_id",
+            query_id=stable_id,
+        ) from exc
+    return _to_json({
+        "message": f"Saved validated-query candidate '{stable_id}' for connection '{connection_name}'.",
+        "validation_status": entry.validation.status,
+        **result,
+    })
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+def list_validated_queries(
+    connection_name: str,
+    connections_dir: str = DEFAULT_CONNECTIONS_DIR,
+    include_dax: bool = False,
+) -> str:
+    """List connection-scoped validated query metadata.
+
+    Set include_dax=True only when you need the actual DAX examples; context
+    bundles intentionally include metadata only.
+    """
+    _get_connection(connection_name, connections_dir)
+    resolved_dir = resolve_connections_dir(connections_dir)
+    library_dir = validated_query_library_dir(resolved_dir, connection_name)
+    entries = load_validated_query_library(
+        resolved_dir,
+        connection_name,
+        include_query_text=include_dax,
+    )
+    return _to_json({
+        "connection_name": connection_name,
+        "found": library_dir.exists(),
+        "library_dir": str(library_dir),
+        "query_count": len(entries),
+        "queries": [
+            summarize_validated_query_entry(entry, include_query_text=include_dax)
+            for entry in entries
+        ],
+    })
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+def search_validated_queries(
+    connection_name: str,
+    search_term: str = "",
+    tags: str = "",
+    connections_dir: str = DEFAULT_CONNECTIONS_DIR,
+    max_results: int = 20,
+    include_dax: bool = True,
+) -> str:
+    """Search saved known-good DAX examples for a connection.
+
+    Search matches id, display name, description, tags, grain, and DAX text.
+    Results include DAX by default because this is an explicit retrieval tool.
+    """
+    _get_connection(connection_name, connections_dir)
+    if max_results < 1:
+        raise invalid_params(
+            message="max_results must be at least 1.",
+            suggestion="Use max_results=20 for a normal validated-query search.",
+            parameter="max_results",
+            provided=max_results,
+        )
+    resolved_dir = resolve_connections_dir(connections_dir)
+    entries = load_validated_query_library(
+        resolved_dir,
+        connection_name,
+        include_query_text=True,
+    )
+    matches = search_validated_query_entries(
+        entries,
+        search_term,
+        tags=_parse_tag_list(tags),
+        max_results=max_results,
+        include_query_text=include_dax,
+    )
+    return _to_json({
+        "connection_name": connection_name,
+        "search_term": search_term,
+        "tags": _parse_tag_list(tags),
+        "match_count": len(matches),
+        "matches": matches,
+    })
+
+
+@mcp.tool()
+def validate_query_library(
+    connection_name: str,
+    connections_dir: str = DEFAULT_CONNECTIONS_DIR,
+    query_id: str = "",
+    max_rows: int = 1,
+    continue_on_error: bool = True,
+) -> str:
+    """Execute saved query-library examples and persist validation metadata.
+
+    max_rows caps returned rows but does not guarantee a cheap server-side DAX
+    plan; keep validation queries intentionally small and well-filtered.
+    """
+    if max_rows < 1:
+        raise invalid_params(
+            message="max_rows must be at least 1 for query-library validation.",
+            suggestion="Use max_rows=1 for the lightest validated-query smoke test.",
+            parameter="max_rows",
+            provided=max_rows,
+        )
+    connection = _get_connection(connection_name, connections_dir)
+    resolved_dir = resolve_connections_dir(connections_dir)
+    if query_id.strip():
+        try:
+            entries = [find_validated_query_entry(resolved_dir, connection_name, query_id)]
+        except FileNotFoundError as exc:
+            raise invalid_params(
+                message=str(exc),
+                suggestion="Call list_validated_queries to see available query IDs.",
+                parameter="query_id",
+                provided=query_id,
+            ) from exc
+    else:
+        entries = load_validated_query_library(
+            resolved_dir,
+            connection_name,
+            include_query_text=True,
+        )
+
+    results: list[dict[str, Any]] = []
+    transport = _connection_type(connection)
+    for entry in entries:
+        item: dict[str, Any] = {
+            "id": entry.id,
+            "connection_name": connection_name,
+            "max_rows": max_rows,
+        }
+        rendered_query = ""
+        try:
+            rendered_query = render_validated_query(entry)
+            validate_dax_query(rendered_query)
+            dataframe = _execute_connection_dataframe(connection, rendered_query, max_rows=max_rows)
+            validation = validation_record_from_result(
+                rendered_query=rendered_query,
+                row_count=int(len(dataframe)),
+                columns=[str(column) for column in dataframe.columns],
+                max_rows=max_rows,
+                transport=transport,
+            )
+            update_validation_record(entry, resolved_dir, validation)
+        except (DAXExecutionError, FileNotFoundError, ToolError, ValueError) as exc:
+            validation = failed_validation_record(
+                rendered_query=rendered_query,
+                error=str(exc),
+                max_rows=max_rows,
+                transport=transport,
+            )
+            update_validation_record(entry, resolved_dir, validation)
+            item.update({
+                "status": "failed",
+                "error": str(exc),
+            })
+            results.append(item)
+            if not continue_on_error:
+                break
+            continue
+
+        item.update({
+            "status": "passed",
+            "row_count": validation.row_count,
+            "columns": validation.columns,
+            "rendered_dax_hash": validation.rendered_dax_hash,
+        })
+        results.append(item)
+
+    failed_count = sum(1 for item in results if item["status"] != "passed")
+    return _to_json({
+        "connection_name": connection_name,
+        "library_dir": str(validated_query_library_dir(resolved_dir, connection_name)),
+        "query_count": len(results),
+        "success_count": len(results) - failed_count,
+        "passed_count": len(results) - failed_count,
+        "failure_count": failed_count,
+        "failed_count": failed_count,
+        "valid": failed_count == 0,
+        "max_rows": max_rows,
+        "continue_on_error": continue_on_error,
+        "note": "max_rows limits returned rows but may not make the server-side DAX plan cheap.",
+        "queries": results,
+    })
 
 
 @mcp.tool()
@@ -1603,19 +3079,229 @@ def clear_workstation(
     })
 
 
-_MULTI_PYPROJECT_TEMPLATE = textwrap.dedent("""\
-    [project]
-    name = "{project_name}"
-    version = "0.1.0"
-    description = "DAX workstation — exported queries"
-    requires-python = ">=3.12"
-    dependencies = [
-        "ipykernel>=6.29.0",
-        "pandas>=2.3.0",
-        "pywin32>=310",
-        "rich>=13.0.0",
-    ]
-""")
+@mcp.tool()
+def create_query_pack(
+    output_dir: str,
+    name: str = "query-pack",
+    description: str = "",
+    overwrite: bool = False,
+) -> str:
+    """Create an empty durable query pack with a versioned pack.yaml manifest."""
+    pack = QueryPack(name=name, description=description)
+    result = save_query_pack(pack, output_dir, overwrite=overwrite)
+    return _to_json({
+        "message": f"Created query pack '{pack.name}'.",
+        **result,
+    })
+
+
+@mcp.tool()
+def save_query_to_pack(
+    pack_path: str,
+    connection_name: str,
+    query: str,
+    description: str,
+    query_id: str = "",
+    display_name: str = "",
+    tags: str = "",
+    parameters_json: str = "",
+    table_name: str = "",
+    overwrite: bool = False,
+) -> str:
+    """Save a DAX query into a durable query pack on disk.
+
+    Unlike the session workstation, durable query packs reject duplicate query
+    IDs unless overwrite=True is explicitly provided.
+    """
+    validate_dax_query(query)
+    pack, root = _load_query_pack_and_root(pack_path)
+    stable_id = slugify_query_id(query_id or display_name or description)
+    existing_index = next((i for i, entry in enumerate(pack.queries) if entry.id == stable_id), None)
+    if existing_index is not None and not overwrite:
+        raise invalid_params(
+            message=f"Query id '{stable_id}' already exists in the pack.",
+            suggestion="Choose a different query_id or call save_query_to_pack with overwrite=True.",
+            parameter="query_id",
+            query_id=stable_id,
+        )
+    parameters: dict[str, QueryParameter] = {}
+    if parameters_json.strip():
+        try:
+            raw_parameters = json.loads(parameters_json)
+        except json.JSONDecodeError as exc:
+            raise invalid_params(
+                message="parameters_json must be a JSON object.",
+                suggestion='Use a JSON object like {"fiscal_year": {"type": "text", "default": "FY26"}}.',
+                parameter="parameters_json",
+            ) from exc
+        if not isinstance(raw_parameters, dict):
+            raise invalid_params(
+                message="parameters_json must be a JSON object.",
+                suggestion='Use a JSON object like {"fiscal_year": {"type": "text", "default": "FY26"}}.',
+                parameter="parameters_json",
+            )
+        try:
+            parameters = {
+                str(name): QueryParameter.from_raw(definition)
+                for name, definition in raw_parameters.items()
+            }
+        except ValueError as exc:
+            raise invalid_params(
+                message=str(exc),
+                suggestion="Use supported parameter types: text, number, date, boolean, list[text].",
+                parameter="parameters_json",
+            ) from exc
+
+    entry = QueryPackEntry(
+        id=stable_id,
+        display_name=display_name or stable_id,
+        connection_name=connection_name,
+        file=f"queries/{stable_id}.dax",
+        description=description,
+        tags=_parse_tag_list(tags),
+        parameters=parameters,
+        outputs=QueryOutputs(table_name=table_name or stable_id),
+        query_text=query,
+    )
+    if existing_index is None:
+        pack.queries.append(entry)
+    else:
+        pack.queries[existing_index] = entry
+
+    result = save_query_pack(pack, root, overwrite=True)
+    return _to_json({
+        "message": f"Saved query '{stable_id}' to query pack '{pack.name}'.",
+        "query_id": stable_id,
+        **result,
+    })
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+def list_query_pack(pack_path: str) -> str:
+    """List query-pack metadata and query entries from pack.yaml."""
+    pack = load_query_pack(pack_path)
+    return _to_json(query_pack_summary(pack))
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+def validate_query_pack(
+    pack_path: str,
+    connections_dir: str = DEFAULT_CONNECTIONS_DIR,
+    dry_run: bool = False,
+    max_rows: int = 1,
+    continue_on_error: bool = True,
+) -> str:
+    """Validate a query pack structurally and optionally smoke-test each query."""
+    pack, root = _load_query_pack_and_root(pack_path)
+    connections = load_connections(connections_dir)
+    connection_names = set(connections.keys())
+    payload = validate_query_pack_model(
+        pack,
+        pack_root=root,
+        connection_names=connection_names,
+        dax_validator=validate_dax_query,
+    )
+    payload["dry_run_requested"] = bool(dry_run)
+    if dry_run:
+        if max_rows < 1:
+            raise invalid_params(
+                message="max_rows must be at least 1 for dry-run validation.",
+                suggestion="Use max_rows=1 for the lightest query-pack smoke test.",
+                parameter="max_rows",
+                provided=max_rows,
+            )
+        if not payload.get("valid"):
+            payload["dry_run"] = {
+                "enabled": False,
+                "skipped_reason": "Structural validation failed; fix errors before live dry-run validation.",
+                "max_rows": max_rows,
+                "continue_on_error": continue_on_error,
+                "query_count": 0,
+                "success_count": 0,
+                "passed_count": 0,
+                "failure_count": 0,
+                "failed_count": 0,
+                "queries": [],
+            }
+            return _to_json(payload)
+
+        payload["dry_run"] = _dry_run_query_pack(
+            pack,
+            root,
+            connections,
+            max_rows=max_rows,
+            continue_on_error=continue_on_error,
+        )
+        failed = [item for item in payload["dry_run"]["queries"] if item["status"] != "passed"]
+        if failed:
+            payload["valid"] = False
+            payload["error_count"] = int(payload.get("error_count", 0)) + len(failed)
+            payload.setdefault("errors", []).extend(
+                f"Dry run failed for query '{item['id']}': {item.get('error', 'unknown error')}"
+                for item in failed
+            )
+    return _to_json(payload)
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+def describe_query_pack(
+    pack_path: str,
+    connections_dir: str = DEFAULT_CONNECTIONS_DIR,
+    include_validation: bool = True,
+) -> str:
+    """Generate a shareable markdown description of a query pack."""
+    pack, root = _load_query_pack_and_root(pack_path)
+    validation: dict[str, Any] | None = None
+    if include_validation:
+        connection_names = set(load_connections(connections_dir).keys())
+        validation = validate_query_pack_model(
+            pack,
+            pack_root=root,
+            connection_names=connection_names,
+            dax_validator=validate_dax_query,
+        )
+    return _to_json({
+        "pack_path": str(root),
+        "markdown": describe_query_pack_markdown(
+            pack,
+            validation=validation,
+            pack_path=root,
+        ),
+        "validation": validation,
+    })
+
+
+@mcp.tool()
+def export_query_pack(
+    pack_path: str,
+    output_dir: str = "",
+    connections_dir: str = DEFAULT_CONNECTIONS_DIR,
+    include_power_query: bool = True,
+    include_streamlit: bool = True,
+    overwrite: bool = True,
+) -> str:
+    """Export a query pack as a runnable Python/Streamlit/Power Query workspace."""
+    workspace_result = export_query_pack_workspace(
+        pack_path,
+        output_dir or None,
+        connections_dir,
+        include_power_query=include_power_query,
+        include_streamlit=include_streamlit,
+        overwrite=overwrite,
+    )
+
+    return _to_json({
+        "message": (
+            f"Exported query pack '{workspace_result['pack_name']}' "
+            f"with {workspace_result['query_count']} query(ies)."
+        ),
+        "output_dir": workspace_result["output_dir"],
+        "manifest_path": workspace_result["manifest_path"],
+        "files_created": workspace_result["files_created"],
+        "query_count": workspace_result["query_count"],
+        "project_name": workspace_result["project_name"],
+        "next_steps": workspace_result["next_steps"],
+    })
 
 
 @mcp.tool()
@@ -1641,101 +3327,47 @@ def export_workstation(
             "files_created": [],
         })
 
-    entries = list(_workstation.values())
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
-    queries_dir = out / "queries"
-    queries_dir.mkdir(exist_ok=True)
-    created: list[str] = []
-
-    # Write .dax files
-    for entry in entries:
-        dax_path = queries_dir / f"{entry['query_name']}.dax"
-        dax_path.write_text(entry["query"], encoding="utf-8")
-        created.append(str(dax_path))
+    if format not in {"scaffold", "dax"}:
+        raise invalid_params(
+            message=f"Unsupported export format '{format}'.",
+            suggestion="Use format='scaffold' or format='dax'.",
+            parameter="format",
+            provided=format,
+        )
 
     if format == "dax":
+        queries_dir = out / "queries"
+        queries_dir.mkdir(exist_ok=True)
+        created: list[str] = []
+        for entry in _workstation.values():
+            dax_path = queries_dir / f"{entry['query_name']}.dax"
+            dax_path.write_text(entry["query"], encoding="utf-8")
+            created.append(str(dax_path))
         return _to_json({
-            "message": f"Exported {len(entries)} .dax file(s).",
+            "message": f"Exported {len(created)} .dax file(s).",
             "files_created": created,
             "output_dir": str(out),
         })
 
-    # ── scaffold format ──────────────────────────────────────────────
-    connection_names = sorted({e["connection_name"] for e in entries})
-    available_connections = load_connections(connections_dir)
-    connections_config: dict[str, dict[str, Any]] = {}
-    for connection_name in connection_names:
-        connection = available_connections.get(connection_name)
-        if connection is None:
-            connections_config[connection_name] = build_scaffold_connection_config()
-            continue
-
-        connections_config[connection_name] = build_scaffold_connection_config(
-            connection_string=connection.connection_string,
-            transport=connection.transport,
-            dataset_id=connection.dataset_id,
-            auth_mode=connection.auth_mode,
-            access_token_env=connection.access_token_env,
-            api_base_url=connection.api_base_url,
-            impersonated_user_name=connection.impersonated_user_name,
-            connection_timeout_seconds=connection.connection_timeout_seconds,
-            command_timeout_seconds=connection.command_timeout_seconds,
-            max_rows=connection.max_rows,
-        )
-
-    queries_payload = [
-        {
-            "name": e["query_name"],
-            "file": f"queries/{e['query_name']}.dax",
-            "connection": e["connection_name"],
-            "description": e["description"],
-        }
-        for e in entries
-    ]
-
-    safe_project = out.name.replace(" ", "-").lower()
-
-    run_script = out / "run_queries.py"
-    run_script.write_text(
-        render_run_queries_script(
-            connections_config=connections_config,
-            queries=queries_payload,
-        ),
-        encoding="utf-8",
+    pack = _workstation_to_query_pack(
+        name=out.name.replace(" ", "-").lower(),
+        description="Queries exported from the dax-query-mcp session workstation.",
     )
-    created.append(str(run_script))
+    result = save_query_pack(pack, out, overwrite=True)
+    created = list(result["files_created"])
 
-    pyproject = out / "pyproject.toml"
-    pyproject.write_text(
-        _MULTI_PYPROJECT_TEMPLATE.format(project_name=safe_project),
-        encoding="utf-8",
-    )
-    created.append(str(pyproject))
-
-    # README listing all queries
-    readme_lines = [
-        f"# {safe_project}\n",
-        "\nDAX workstation exported by **dax-query-mcp**.\n",
-        "\n## Quick start\n",
-        "\n```bash\ncd " + str(out) + " && uv run run_queries.py\n```\n",
-        "\n## Queries\n",
-        "\n| Name | Connection | Description |",
-        "\n|------|------------|-------------|",
-    ]
-    for e in entries:
-        readme_lines.append(f"\n| {e['query_name']} | {e['connection_name']} | {e['description']} |")
-    readme_lines.append("\n")
-
-    readme = out / "README.md"
-    readme.write_text("".join(readme_lines), encoding="utf-8")
-    created.append(str(readme))
+    workspace_result = write_query_pack_workspace(pack, out, out, connections_dir)
+    created.extend(workspace_result["files_created"])
 
     return _to_json({
-        "message": f"Exported {len(entries)} query(ies) as scaffold workspace.",
+        "message": f"Exported {len(pack.queries)} query(ies) as scaffold query-pack workspace.",
         "files_created": created,
-        "output_dir": str(out),
-        "project_name": safe_project,
+        "output_dir": workspace_result["output_dir"],
+        "manifest_path": workspace_result["manifest_path"],
+        "project_name": workspace_result["project_name"],
+        "next_steps": workspace_result["next_steps"],
     })
 
 
