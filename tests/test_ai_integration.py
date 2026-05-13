@@ -362,9 +362,9 @@ class TestQueryExecution:
         # Must contain the heading
         has_heading = "what would you like to do next?" in final_lower
 
-        # Must contain at least 5 of the 11 numbered items
+        # Must contain at least 5 of the 12 numbered items
         numbered_items_found = sum(
-            1 for i in range(1, 12) if f"{i}." in final
+            1 for i in range(1, 13) if f"{i}." in final
         )
 
         # Must contain specific action keywords from _NEXT_STEPS
@@ -377,7 +377,7 @@ class TestQueryExecution:
             f"Response snippet: {final[:500]}"
         )
         assert numbered_items_found >= 5, (
-            f"Expected at least 5 numbered items (1. through 11.), "
+            f"Expected at least 5 numbered items (1. through 12.), "
             f"found {numbered_items_found}. Response snippet: {final[:500]}"
         )
         assert has_filter and has_export and has_chart, (

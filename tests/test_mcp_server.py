@@ -200,6 +200,7 @@ description: "Sales model"
     assert "| Month | Revenue |" in result
     assert "What would you like to do next?" in result
     assert "Copy to clipboard" in result
+    assert "12. Save to validated query library" in result
     assert "### Query preview for `sales`" in result
 
 
@@ -1438,6 +1439,8 @@ def test_run_connection_query_renders_registry_followup_menu(monkeypatch, tmp_pa
 
     for index, step in enumerate(rendered_next_steps(), start=1):
         assert f"{index}. {step}" in result
+    assert "11. Re-run last query" in result
+    assert "12. Save to validated query library" in result
 
 
 def test_followup_recommendations_use_latest_query_context(monkeypatch, tmp_path) -> None:

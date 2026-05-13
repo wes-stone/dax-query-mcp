@@ -574,10 +574,11 @@ Saved `.dax` files open directly in **DAX Studio**. See `docs/` for detailed CLI
 execution is skipped until manifest, query, connection, and parameter checks are
 clean.
 
-The query result menu remains the flat 11-item compatibility contract. Agents
-that need machine-readable scope can read `followup://menu/grouped` to separate
-**This query** actions from durable **Current pack** and **Validated query
-library** actions.
+The query result menu preserves the original flat 1-11 compatibility contract
+and adds option 12 to save successful queries to the **Validated query library**.
+Agents that need machine-readable scope can read `followup://menu/grouped` to
+separate **This query** actions from durable **Current pack** and **Validated
+query library** actions.
 
 ## Copilot guard hook
 

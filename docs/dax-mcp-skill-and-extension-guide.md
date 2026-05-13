@@ -273,7 +273,7 @@ exactly as returned, do not generate your own version, then map user selections.
 
 If the user asks to show, repeat, or copy the current DAX text without executing
 it (for example, "give me the query again"), output the DAX and then append the
-same 11-item compatibility menu below. This preserves the current-query action
+same 12-item compatibility menu below. This preserves the current-query action
 affordance even though no query-execution tool returned a fresh menu.
 
 | User Says | Tool to Call |
@@ -289,9 +289,11 @@ affordance even though no query-execution tool returned a fresh menu.
 | "9" or "dax studio" | `save_query_builder` |
 | "10" or "scaffold" | `scaffold_dax_workspace` |
 | "11" or "re-run" | `run_connection_query` with same params |
-| "show query" or "give me the query again" | Output the current DAX text, then append the 11-item menu |
+| "12" or "validated query" | `save_validated_query` |
+| "show query" or "give me the query again" | Output the current DAX text, then append the 12-item menu |
 
-The flat 11-item menu is the compatibility contract for the current query.
+The flat menu preserves the original 1-11 compatibility contract for current
+query actions and adds option 12 for the validated query library.
 For durable multi-query work, use query packs. Agents can inspect
 `followup://menu/grouped` to distinguish **This query** actions from
 **Current pack** actions such as validate, describe, and export query pack, and
@@ -317,9 +319,10 @@ When any query tool returns a result, output the **entire returned string**.
 
 What would you like to do next?
 
- 1. Filter / refine — ...
+1. Filter / refine — ...
 ...
 11. Re-run last query — ...
+12. Save to validated query library — ...
 ```
 
 ### ❌ Wrong
