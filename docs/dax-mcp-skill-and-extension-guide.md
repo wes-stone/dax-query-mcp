@@ -64,26 +64,30 @@ description: >
 
 1. **Use MCP tools only.** Never write raw Python, never call `dax_to_pandas`
    directly, never launch explore agents to find connection files.
-2. **Execute queries — don't just show DAX text.** Build the DAX AND call
+2. **Resolve the connection first.** If the user does not name an exact
+   connection, immediately call `list_connections()` before answering. If the
+   right connection is still unclear, ask which connection to use instead of
+   guessing.
+3. **Execute queries — don't just show DAX text.** Build the DAX AND call
    `run_connection_query` in the same turn.
-3. **Output query results verbatim.** The tool returns a complete markdown
+4. **Output query results verbatim.** The tool returns a complete markdown
    string (table + follow-up menu). Output the ENTIRE string as your response.
    Do NOT summarize, convert the table to bullet points, or omit the
    "What would you like to do next?" menu.
-4. **Call `get_connection_context` once per session** before writing your first
+5. **Call `get_connection_context` once per session** before writing your first
    query. Don't re-read it every turn.
-5. **Use progressive context when needed.** Start compact, then drill into
+6. **Use progressive context when needed.** Start compact, then drill into
    `get_context_bundle`, `get_table_detail`, `get_measure_detail`,
    `get_relationships`, and `get_filter_suggestions` instead of loading
    everything.
-6. **Preserve discovered context.** Exploration can discover
+7. **Preserve discovered context.** Exploration can discover
    tables/measures/relationships, but durable knowledge belongs in overview/full
    markdown, `.data_dictionary.yaml`, and validated query libraries.
-7. **Reuse known-good patterns.** Search `search_validated_queries` before
+8. **Reuse known-good patterns.** Search `search_validated_queries` before
    inventing DAX for a recurring metric/grain/filter shape. Save repeated,
    successful patterns with `save_validated_query`, then smoke-test them with
    `validate_query_library`.
-8. **Never run admin queries.** No `INFO.*()`, `$SYSTEM.DISCOVER_*`, `DBCC`,
+9. **Never run admin queries.** No `INFO.*()`, `$SYSTEM.DISCOVER_*`, `DBCC`,
    `ALTER`, `CREATE`, `DELETE`, `DROP`. Use context tools, `inspect_connection`,
    or `generate_data_dictionary` for metadata.
 
@@ -92,7 +96,8 @@ description: >
 ## 2. First-Time Workflow
 
 ```
-Step 1 → list_connections()                             # discover what's available
+Step 1 → list_connections()                             # discover what connection names are available
+Step 1b → if the user did not name an exact connection, ask them to choose from the listed connections
 Step 2 → get_connection_context("my_connection")        # compact model overview
 Step 2b → get_context_bundle("my_connection")           # optional structured counts/relationships
 Step 2c → get_table_detail / get_measure_detail / get_relationships only if needed
@@ -102,17 +107,36 @@ Step 3 → run_connection_query("my_connection", "EVALUATE SUMMARIZECOLUMNS(...)
 Step 4 → User picks from the follow-up menu (e.g., "3" = save to workstation)
 ```
 
+### Ambiguous Connection Prompts
+
+When the user says something like "show revenue", "give me model connection
+examples", "run the bookings query", or otherwise names a business area instead
+of an exact connection:
+
+1. Call `list_connections()` first.
+2. Match the user's words against connection names/descriptions.
+3. If there is exactly one obvious match, use that connection and call `get_connection_context`.
+4. If there are multiple matches or no matches, ask the user which connection they want.
+5. Only provide generic YAML connection templates if the user explicitly asks for templates or no configured connection exists.
+
+Do **not** invent connection names, workspace names, dataset names, local ports, or
+local file paths. For examples, use placeholders such as `<WORKSPACE_NAME>`,
+`<DATASET_NAME>`, `<PORT>`, and `%USERPROFILE%\.copilot\dax-query-mcp\Connections\`.
+Never include real username-specific Windows profile paths in shareable examples.
+
 ### Quick Start Example
 
 ```
 User: "Show me revenue by month"
 
 You should:
-1. Call get_connection_context("my_connection") if not already cached
-2. Use search_validated_queries, search_measures/search_columns, and scoped context tools to resolve exact names and reusable patterns
-3. Build DAX: EVALUATE SUMMARIZECOLUMNS('Calendar'[Month], "Revenue", [Revenue])
-4. Call run_connection_query("my_connection", <DAX>)
-5. Output the full result verbatim — table AND numbered menu
+1. Call list_connections() if no exact connection was named in this session
+2. Ask the user to choose a connection if the intended one is not obvious
+3. Call get_connection_context("my_connection") if not already cached
+4. Use search_validated_queries, search_measures/search_columns, and scoped context tools to resolve exact names and reusable patterns
+5. Build DAX: EVALUATE SUMMARIZECOLUMNS('Calendar'[Month], "Revenue", [Revenue])
+6. Call run_connection_query("my_connection", <DAX>)
+7. Output the full result verbatim — table AND numbered menu
 ```
 
 ---
