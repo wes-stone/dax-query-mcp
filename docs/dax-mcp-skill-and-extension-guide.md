@@ -269,7 +269,12 @@ small and well-filtered. Required parameters need defaults or
 ## 4. Follow-Up Menu Mapping
 
 After every query, the tool returns a server-authored numbered menu. Output it
-exactly as returned, do not generate your own version, then map user selections:
+exactly as returned, do not generate your own version, then map user selections.
+
+If the user asks to show, repeat, or copy the current DAX text without executing
+it (for example, "give me the query again"), output the DAX and then append the
+same 11-item compatibility menu below. This preserves the current-query action
+affordance even though no query-execution tool returned a fresh menu.
 
 | User Says | Tool to Call |
 |-----------|-------------|
@@ -284,6 +289,7 @@ exactly as returned, do not generate your own version, then map user selections:
 | "9" or "dax studio" | `save_query_builder` |
 | "10" or "scaffold" | `scaffold_dax_workspace` |
 | "11" or "re-run" | `run_connection_query` with same params |
+| "show query" or "give me the query again" | Output the current DAX text, then append the 11-item menu |
 
 The flat 11-item menu is the compatibility contract for the current query.
 For durable multi-query work, use query packs. Agents can inspect
