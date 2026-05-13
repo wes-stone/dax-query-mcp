@@ -15,6 +15,8 @@ Check out [making use of skills and extensions](docs/dax-mcp-skill-and-extension
 - **Export anywhere** — CSV, clipboard, Power Query M code, Streamlit apps, standalone Python projects
 - **Query builder** — save `.dax` + `.dax.queryBuilder` artifacts, open directly in DAX Studio
 - **Workstation session** — save, list, and batch-export queries during an exploration session
+- **Durable query packs** — turn saved DAX into portable packs with a manifest, batch runner, Streamlit explorer, and Power Query files
+- **Validated query libraries** — keep connection-scoped, known-good DAX examples that improve future context without creating a full pack
 
 ## Prerequisites
 
@@ -101,6 +103,7 @@ Then add context files with the same connection name:
 | `Connections/my_model_overview.md` | Optional compact overview used first by `get_connection_context`; include the most important tables, measures, filters, and example queries. |
 | `Connections/my_model.md` | Optional full model context; include detailed table notes, business definitions, caveats, relationships, and query patterns. |
 | `Connections/my_model.data_dictionary.yaml` | Optional structured dictionary used by `get_data_dictionary`, `get_schema`, `search_columns`, `search_measures`, and context detail tools; include tables, columns, measures, filters, relationships, descriptions, and sample values. |
+| `Connections/my_model.validated_queries/` | Optional validated query library; one metadata file plus one `.dax` file per reusable known-good query pattern. |
 
 Recommended setup flow:
 
@@ -108,6 +111,7 @@ Recommended setup flow:
 2. Add a short `_overview.md` so Copilot can quickly understand the model before writing DAX.
 3. Add the fuller `.md` context for detailed business logic, naming conventions, and examples.
 4. Add or generate the `.data_dictionary.yaml` so tools can search fields and measures structurally.
+5. After real queries work, save repeated patterns to `.validated_queries/` so future sessions can reuse known-good DAX.
 
 You can create the dictionary manually or, for MSOLAP connections, scaffold one
 from the live model with the `generate_data_dictionary` MCP tool. The generator
@@ -386,7 +390,7 @@ paths.
 | `export_to_csv`             | Export results to a timestamped CSV                  |
 | `copy_to_clipboard`         | Copy results to clipboard (TSV or markdown)          |
 | `scaffold_power_query`      | Generate Power Query M code for Excel                |
-| `scaffold_streamlit_app`    | Generate a Streamlit visualization app               |
+| `scaffold_streamlit_app`    | Generate a live single-query Streamlit explorer      |
 | `scaffold_dax_workspace`    | Scaffold a standalone Python project                 |
 | `quick_chart`               | Render a bar/line/pie chart as PNG                   |
 | **Query builder**           |                                                      |
@@ -397,6 +401,18 @@ paths.
 | `save_to_workstation`       | Save a query to the session workstation              |
 | `list_workstation`          | List saved workstation queries                       |
 | `export_workstation`        | Batch-export workstation as scaffold or `.dax` files |
+| **Query packs**             |                                                      |
+| `create_query_pack`         | Create an empty durable query-pack folder            |
+| `save_query_to_pack`        | Add or update a DAX query in `pack.yaml` + `queries/` |
+| `list_query_pack`           | Summarize a saved pack and its query metadata        |
+| `validate_query_pack`       | Check manifest shape, safe DAX, parameters, and connections |
+| `describe_query_pack`       | Generate a markdown pack summary for review and sharing |
+| `export_query_pack`         | Generate runner, Streamlit, Power Query, and README artifacts |
+| **Validated query libraries** |                                                    |
+| `save_validated_query`      | Save a reusable DAX example under a connection-scoped library |
+| `list_validated_queries`    | List saved examples, tags, parameters, and validation status |
+| `search_validated_queries`  | Retrieve known-good DAX examples for future query authoring |
+| `validate_query_library`    | Smoke-test saved examples and persist status, columns, and row counts |
 
 > **Admin queries are blocked.** `INFO.*()` and `$SYSTEM.DISCOVER_*` require server admin rights.
 > General query execution only allows safe `MDSCHEMA` rowsets. Optional
@@ -407,7 +423,7 @@ paths.
 
 `scaffold_dax_workspace` exports one query as a standalone Python project.
 `export_workstation(format="scaffold")` exports every query saved in the
-session workstation as one multi-query project.
+session workstation as one multi-query **query-pack** project.
 
 Generated projects include transport-aware connection config:
 
@@ -423,6 +439,103 @@ auth mode, timeout, and mock/REST metadata aligned with the named connection.
 Do not commit generated workspaces that contain private dataset IDs, workspace
 names, connection strings, or tokens.
 
+### Query packs
+
+A query pack is a portable, human-editable DAX workspace:
+
+```text
+my-query-pack/
+  pack.yaml
+  connections.json
+  queries/
+    monthly_arr.dax
+  results/
+    monthly_arr.csv
+    monthly_arr.schema.json
+    run_log.json
+  power_query/
+    monthly_arr.pq
+  streamlit_app.py
+  run_queries.py
+  pyproject.toml
+  README.md
+```
+
+Use query packs when an exploration becomes reusable. The in-memory workstation
+is still best for scratch work; `export_workstation(format="scaffold")` now makes
+that scratch work durable as a query pack. For curated projects, use
+`create_query_pack`, `save_query_to_pack`, `validate_query_pack`,
+`describe_query_pack`, and `export_query_pack` directly.
+
+Generated `run_queries.py` supports batch execution with `--list`, `--only`,
+`--tag`, `--param name=value`, `--output`, `--format csv|json`, `--max-rows`,
+`--continue-on-error`, and `--fail-fast`. Each run writes one result file per
+query plus schema sidecars and `results/run_log.json`. Generated workspaces also
+include `pyproject.toml` so `uv run` and `uv sync` manage the environment from
+the project manifest.
+
+Generated `streamlit_app.py` is the full interactive explorer for a pack. It
+includes query catalog search, tag and connection filters, typed parameter
+controls, editable rendered DAX, cached execution, an Explore tab that keeps
+run/results/charts/pivots together, session run history, column filters,
+drag-and-drop CSV/JSON upload exploration, profiling, and CSV/JSON/schema/DAX
+downloads. Use it when you want a DAX
+Studio-like exploration surface over curated queries:
+
+```bash
+cd .\my-workspace
+uv run streamlit run streamlit_app.py
+```
+
+Generated `power_query/*.pq` is first-class for MSOLAP connections. REST-backed
+connections produce an explicit stub until Excel Power Query token refresh is
+safe enough to automate. Query packs never store tokens or passwords.
+
+The project also includes a Copilot CLI extension in
+`.github/extensions/dax-query-pack/extension.mjs`. After `extensions_reload`, it
+adds `dax_pack_*` tools that wrap the same query-pack library and return
+copyable commands for batch execution and Streamlit.
+
+### Validated query libraries
+
+Validated query libraries are connection-scoped context artifacts, not runnable
+workspace projects. Use them for recurring patterns that should guide future DAX
+generation: common measures, period grains, required filters, and safe
+`SUMMARIZECOLUMNS` shapes. Use query packs when you need a shareable project
+with batch execution, Streamlit, Power Query, and result artifacts.
+
+Each library lives beside the connection config and stores one metadata file plus
+one DAX file per query:
+
+```text
+Connections/
+  sales.yaml
+  sales.validated_queries/
+    monthly_revenue.yaml
+    monthly_revenue.dax
+```
+
+The metadata stores intent, tags, declared parameters, sample validation
+parameters, output defaults, validation status, row count, returned columns, and
+a rendered DAX hash. It never stores result rows or secrets. If the DAX file
+changes after validation, list/search/context calls mark the entry as `stale`.
+
+Typical MCP workflow:
+
+```text
+search_validated_queries → run_connection_query → save_validated_query → validate_query_library(max_rows=1)
+```
+
+`max_rows` caps returned rows but may not make the server-side DAX plan cheap, so
+keep validation examples intentionally small and well-filtered. Required
+parameters need defaults or `sample_parameters_json` before an entry can pass
+validation.
+
+`get_context_bundle` includes compact metadata-only summaries from the library so
+agents can discover that reusable patterns exist without loading every DAX file.
+Use `search_validated_queries` or `list_validated_queries(include_dax=True)` when
+you need the actual DAX template for query authoring.
+
 ## CLI usage
 
 ```bash
@@ -437,9 +550,30 @@ dax-query --inspect-connection my_model --connections-dir Connections
 
 # Save a query builder artifact
 dax-query-builder --save-query-builder-from builder.json --config-dir queries
+
+# Create and export a durable query pack
+dax-query-pack create --output-dir .\my-pack --name revenue-exploration
+dax-query-pack add-query --pack-path .\my-pack --connection-name arr_connection --query "EVALUATE ROW(\"Example\", 1)" --description "Example query"
+dax-query-pack validate --pack-path .\my-pack --connections-dir Connections
+dax-query-pack describe --pack-path .\my-pack --connections-dir Connections
+dax-query-pack export --pack-path .\my-pack --output-dir .\my-workspace --connections-dir Connections
+
+# Get commands to run the generated workspace
+dax-query-pack run-command --workspace-dir .\my-workspace --only example-query --format csv
+dax-query-pack streamlit-command --workspace-dir .\my-workspace
 ```
 
 Saved `.dax` files open directly in **DAX Studio**. See `docs/` for detailed CLI documentation.
+
+`validate_query_pack` can also run a live smoke test through the MCP with
+`dry_run=True` and a low `max_rows` cap. Structural validation runs first; live
+execution is skipped until manifest, query, connection, and parameter checks are
+clean.
+
+The query result menu remains the flat 11-item compatibility contract. Agents
+that need machine-readable scope can read `followup://menu/grouped` to separate
+**This query** actions from durable **Current pack** and **Validated query
+library** actions.
 
 ## Copilot guard hook
 

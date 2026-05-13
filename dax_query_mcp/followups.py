@@ -21,6 +21,8 @@ class FollowupAction:
     produces: tuple[str, ...] = ()
     rendered: bool = True
     catalog_visible: bool = True
+    grouped_visible: bool = True
+    scope: str = "this_query"
     base_rank: int = 50
     rank_hints: tuple[str, ...] = field(default_factory=tuple)
 
@@ -37,6 +39,7 @@ class FollowupAction:
             "example_usage": self.example_usage,
             "optional_params": list(self.optional_params),
             "category": self.category,
+            "scope": self.scope,
             "consumes": list(self.consumes),
             "produces": list(self.produces),
         }
@@ -55,6 +58,7 @@ FOLLOWUP_ACTIONS: tuple[FollowupAction, ...] = (
         catalog_visible=False,
         base_rank=65,
         rank_hints=("large_result", "many_columns"),
+        scope="this_query",
     ),
     FollowupAction(
         name="aggregate_query",
@@ -68,6 +72,7 @@ FOLLOWUP_ACTIONS: tuple[FollowupAction, ...] = (
         catalog_visible=False,
         base_rank=60,
         rank_hints=("large_result", "numeric_columns"),
+        scope="this_query",
     ),
     FollowupAction(
         name="save_to_workstation",
@@ -78,6 +83,7 @@ FOLLOWUP_ACTIONS: tuple[FollowupAction, ...] = (
         category="workflow_state",
         produces=("workstation_item",),
         base_rank=30,
+        scope="this_query",
     ),
     FollowupAction(
         name="copy_to_clipboard",
@@ -89,6 +95,7 @@ FOLLOWUP_ACTIONS: tuple[FollowupAction, ...] = (
         category="export",
         produces=("clipboard_data",),
         base_rank=40,
+        scope="this_query",
     ),
     FollowupAction(
         name="export_to_csv",
@@ -100,6 +107,7 @@ FOLLOWUP_ACTIONS: tuple[FollowupAction, ...] = (
         category="export",
         produces=("csv_path",),
         base_rank=45,
+        scope="this_query",
     ),
     FollowupAction(
         name="quick_chart",
@@ -112,6 +120,7 @@ FOLLOWUP_ACTIONS: tuple[FollowupAction, ...] = (
         produces=("chart_path",),
         base_rank=35,
         rank_hints=("numeric_columns",),
+        scope="this_query",
     ),
     FollowupAction(
         name="scaffold_power_query",
@@ -123,6 +132,7 @@ FOLLOWUP_ACTIONS: tuple[FollowupAction, ...] = (
         category="scaffold",
         produces=("power_query_m",),
         base_rank=60,
+        scope="this_query",
     ),
     FollowupAction(
         name="scaffold_streamlit_app",
@@ -134,6 +144,7 @@ FOLLOWUP_ACTIONS: tuple[FollowupAction, ...] = (
         category="scaffold",
         produces=("streamlit_app",),
         base_rank=70,
+        scope="this_query",
     ),
     FollowupAction(
         name="scaffold_dax_studio",
@@ -145,6 +156,7 @@ FOLLOWUP_ACTIONS: tuple[FollowupAction, ...] = (
         category="scaffold",
         produces=("dax_studio_files",),
         base_rank=80,
+        scope="this_query",
     ),
     FollowupAction(
         name="scaffold_python",
@@ -156,6 +168,7 @@ FOLLOWUP_ACTIONS: tuple[FollowupAction, ...] = (
         category="scaffold",
         produces=("python_workspace",),
         base_rank=90,
+        scope="this_query",
     ),
     FollowupAction(
         name="rerun_last_query",
@@ -168,6 +181,127 @@ FOLLOWUP_ACTIONS: tuple[FollowupAction, ...] = (
         produces=("query_result",),
         catalog_visible=False,
         base_rank=95,
+        scope="this_query",
+    ),
+    FollowupAction(
+        name="create_query_pack",
+        label="Create query pack",
+        description="Start a durable pack.yaml workspace for reusable DAX queries.",
+        required_params=("output_dir",),
+        optional_params=("name", "description", "overwrite"),
+        example_usage='create_query_pack(output_dir="./pack", name="Revenue Pack")',
+        category="query_pack",
+        consumes=(),
+        produces=("query_pack",),
+        rendered=False,
+        catalog_visible=False,
+        scope="current_pack",
+        base_rank=25,
+    ),
+    FollowupAction(
+        name="save_query_to_pack",
+        label="Save query to pack",
+        description="Persist the current query into a durable query pack.",
+        required_params=("pack_path", "connection_name", "query", "description"),
+        optional_params=("query_id", "display_name", "tags", "parameters_json", "table_name", "overwrite"),
+        example_usage='save_query_to_pack(pack_path="./pack", connection_name="sales", query="EVALUATE ...", description="Monthly sales")',
+        category="query_pack",
+        consumes=("query",),
+        produces=("query_pack_entry",),
+        rendered=False,
+        catalog_visible=False,
+        scope="current_pack",
+        base_rank=28,
+    ),
+    FollowupAction(
+        name="validate_query_pack",
+        label="Validate query pack",
+        description="Check pack structure, safe DAX, connection references, and optional live smoke results.",
+        required_params=("pack_path",),
+        optional_params=("connections_dir", "dry_run", "max_rows", "continue_on_error"),
+        example_usage='validate_query_pack(pack_path="./pack", connections_dir="./Connections", dry_run=True, max_rows=1)',
+        category="query_pack",
+        consumes=("query_pack",),
+        produces=("validation_report",),
+        rendered=False,
+        catalog_visible=False,
+        scope="current_pack",
+        base_rank=32,
+    ),
+    FollowupAction(
+        name="describe_query_pack",
+        label="Describe query pack",
+        description="Generate a markdown summary for sharing the pack with another analyst or agent.",
+        required_params=("pack_path",),
+        optional_params=("connections_dir", "include_validation"),
+        example_usage='describe_query_pack(pack_path="./pack", connections_dir="./Connections")',
+        category="query_pack",
+        consumes=("query_pack",),
+        produces=("markdown_summary",),
+        rendered=False,
+        catalog_visible=False,
+        scope="current_pack",
+        base_rank=34,
+    ),
+    FollowupAction(
+        name="export_query_pack",
+        label="Export query pack",
+        description="Generate multi-query Python, Streamlit, Power Query, and README artifacts.",
+        required_params=("pack_path",),
+        optional_params=("output_dir", "connections_dir", "include_power_query", "include_streamlit", "overwrite"),
+        example_usage='export_query_pack(pack_path="./pack", output_dir="./workspace", connections_dir="./Connections")',
+        category="query_pack",
+        consumes=("query_pack",),
+        produces=("query_pack_workspace",),
+        rendered=False,
+        catalog_visible=False,
+        scope="current_pack",
+        base_rank=36,
+    ),
+    FollowupAction(
+        name="save_validated_query",
+        label="Save validated query",
+        description="Save the current query as a reusable connection-scoped DAX example.",
+        required_params=("connection_name", "query", "description"),
+        optional_params=("query_id", "display_name", "tags", "parameters_json", "sample_parameters_json", "table_name", "overwrite"),
+        example_usage='save_validated_query(connection_name="sales", query="EVALUATE ...", description="Monthly sales pattern")',
+        category="validated_query_library",
+        consumes=("query",),
+        produces=("validated_query_entry",),
+        rendered=False,
+        catalog_visible=False,
+        scope="validated_library",
+        base_rank=29,
+    ),
+    FollowupAction(
+        name="search_validated_queries",
+        label="Search validated queries",
+        description="Find known-good DAX examples for this connection before writing a new query.",
+        required_params=("connection_name",),
+        optional_params=("search_term", "tags", "connections_dir", "max_results", "include_dax"),
+        example_usage='search_validated_queries(connection_name="sales", search_term="monthly revenue")',
+        category="validated_query_library",
+        consumes=(),
+        produces=("validated_query_examples",),
+        rendered=False,
+        catalog_visible=False,
+        scope="validated_library",
+        base_rank=22,
+    ),
+    FollowupAction(
+        name="validate_query_library",
+        label="Validate query library",
+        description="Smoke-test saved library examples and persist validation status, columns, and row counts.",
+        required_params=("connection_name",),
+        optional_params=("connections_dir", "query_id", "max_rows", "continue_on_error"),
+        example_usage='validate_query_library(connection_name="sales", max_rows=1)',
+        category="validated_query_library",
+        consumes=("validated_query_entry",),
+        produces=("validation_report",),
+        rendered=False,
+        catalog_visible=False,
+        scope="validated_library",
+        base_rank=31,
     ),
 )
 
@@ -175,6 +309,47 @@ FOLLOWUP_ACTIONS: tuple[FollowupAction, ...] = (
 def catalog_actions() -> list[dict[str, Any]]:
     """Return actions shown in the stable follow-up resource catalog."""
     return [action.to_catalog_item() for action in FOLLOWUP_ACTIONS if action.catalog_visible]
+
+
+def grouped_catalog_actions() -> dict[str, Any]:
+    """Return follow-up actions grouped by whether they act on a query or a pack."""
+    group_defs = {
+        "this_query": {
+            "scope": "this_query",
+            "label": "This query",
+            "description": "Actions that operate on the current query/result only.",
+        },
+        "current_pack": {
+            "scope": "current_pack",
+            "label": "Current pack",
+            "description": "Durable multi-query actions for reusable query-pack workflows.",
+        },
+        "validated_library": {
+            "scope": "validated_library",
+            "label": "Validated query library",
+            "description": "Connection-scoped known-good DAX examples for context and reuse.",
+        },
+    }
+    groups: dict[str, dict[str, Any]] = {
+        scope: {**definition, "actions": []}
+        for scope, definition in group_defs.items()
+    }
+    for action in FOLLOWUP_ACTIONS:
+        if action.grouped_visible:
+            groups.setdefault(
+                action.scope,
+                {
+                    "scope": action.scope,
+                    "label": action.scope.replace("_", " ").title(),
+                    "description": "",
+                    "actions": [],
+                },
+            )
+            groups[action.scope]["actions"].append(action.to_catalog_item())
+    return {
+        "groups": [group for group in groups.values() if group["actions"]],
+        "flat_rendered_menu": rendered_next_steps(),
+    }
 
 
 def rendered_next_steps() -> list[str]:

@@ -37,6 +37,7 @@ Issues = "https://github.com/wes-stone/dax-query-mcp/issues"
 [project.scripts]
 dax-query = "dax_query_mcp.cli:main"
 dax-query-builder = "dax_query_mcp.cli:main"
+dax-query-pack = "dax_query_mcp.query_pack_cli:main"
 dax-query-server = "dax_query_mcp.mcp_server:main"
 dax-query-guard = "dax_query_mcp.copilot_guard:main"
 

@@ -47,6 +47,15 @@ def test_resolve_connections_dir_prefers_connections(tmp_path: Path, monkeypatch
     assert resolved.name == "Connections"
 
 
+def test_resolve_connections_dir_defaults_to_user_copilot_folder(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+
+    resolved = resolve_connections_dir()
+
+    assert resolved == tmp_path / "home" / ".copilot" / "dax-query-mcp" / "Connections"
+
+
 def test_load_connections_hides_bundled_sample_by_default(tmp_path: Path) -> None:
     connections_dir = tmp_path / "Connections"
     connections_dir.mkdir()

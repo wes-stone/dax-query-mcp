@@ -15,8 +15,11 @@ from dax_query_mcp.data_dictionary import (
     MeasureDef,
     RelationshipDef,
     TableDef,
+    diff_data_dictionaries,
     find_data_dictionary,
     load_data_dictionary,
+    merge_data_dictionaries,
+    review_data_dictionary_update,
     save_data_dictionary,
 )
 
@@ -232,3 +235,102 @@ class TestFindDataDictionary:
     def test_returns_none_for_missing_dir(self, tmp_path: Path):
         dd = find_data_dictionary("anything", str(tmp_path / "does_not_exist"))
         assert dd is None
+
+
+# ── Lifecycle helper tests ────────────────────────────────────────────────────
+
+
+class TestLifecycleHelpers:
+    def test_diff_reports_entity_changes(self) -> None:
+        base = DataDictionary(tables=[TableDef(name="Sales", columns=[ColumnDef(name="Amount")])])
+        candidate = DataDictionary(
+            tables=[
+                TableDef(name="Sales", columns=[ColumnDef(name="Amount"), ColumnDef(name="Date")]),
+                TableDef(name="Products"),
+            ],
+            measures=[MeasureDef(name="Revenue", expression="SUM(Sales[Amount])")],
+        )
+
+        diff = diff_data_dictionaries(base, candidate)
+
+        assert diff["tables"]["added"] == ["Products"]
+        assert diff["columns"]["Sales"]["added"] == ["Date"]
+        assert diff["measures"]["added"] == ["Revenue"]
+
+    def test_merge_preserves_curated_descriptions_and_notes(self) -> None:
+        generated = DataDictionary(
+            tables=[
+                TableDef(
+                    name="Sales",
+                    description="Generated sales",
+                    columns=[ColumnDef(name="Amount", data_type="decimal")],
+                )
+            ],
+            measures=[MeasureDef(name="Revenue", expression="SUM(Sales[Amount])")],
+            relationships=[
+                RelationshipDef(
+                    from_table="Sales",
+                    from_column="ProductKey",
+                    to_table="Products",
+                    to_column="ProductKey",
+                    source="mdschema-inferred",
+                    confidence="medium",
+                )
+            ],
+        )
+        curated = DataDictionary(
+            tables=[
+                TableDef(
+                    name="Sales",
+                    description="Curated sales fact",
+                    columns=[
+                        ColumnDef(
+                            name="Amount",
+                            data_type="currency",
+                            description="Booked amount",
+                            sample_values=["100"],
+                        )
+                    ],
+                )
+            ],
+            measures=[
+                MeasureDef(
+                    name="Revenue",
+                    expression="SUM(Sales[Amount])",
+                    description="Curated revenue definition",
+                    format_string="$#,##0",
+                )
+            ],
+            relationships=[
+                RelationshipDef(
+                    from_table="Sales",
+                    from_column="ProductKey",
+                    to_table="Products",
+                    to_column="ProductKey",
+                    description="Curated product rollup",
+                    source="curated",
+                    confidence="high",
+                )
+            ],
+        )
+
+        merged = merge_data_dictionaries(generated, curated)
+
+        assert merged.tables[0].description == "Curated sales fact"
+        assert merged.tables[0].columns[0].data_type == "decimal"
+        assert merged.tables[0].columns[0].description == "Booked amount"
+        assert merged.tables[0].columns[0].sample_values == ["100"]
+        assert merged.measures[0].description == "Curated revenue definition"
+        assert merged.measures[0].format_string == "$#,##0"
+        assert merged.relationships[0].description == "Curated product rollup"
+        assert merged.relationships[0].source == "curated"
+
+    def test_review_update_returns_diff_and_merged_payload(self) -> None:
+        curated = DataDictionary(tables=[TableDef(name="Sales")])
+        generated = DataDictionary(tables=[TableDef(name="Sales"), TableDef(name="Calendar")])
+
+        review = review_data_dictionary_update(curated, generated)
+
+        assert review["diff"]["tables"]["added"] == ["Calendar"]
+        assert review["summary"]["tables"] == 2
+        assert review["merged"]["tables"][1]["name"] == "Calendar"
