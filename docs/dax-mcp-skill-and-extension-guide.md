@@ -480,7 +480,7 @@ Option C: export_to_csv → open CSV in Excel
 
 ### "Build me a dashboard"
 ```
-For a quick one-off live explorer: scaffold_streamlit_app → uv run streamlit run app.py
+For a quick one-off live explorer: scaffold_streamlit_app(output_path="app.py") → uv run streamlit run app.py
 For a multi-query library: save queries to a query pack → export_query_pack → uv run streamlit run streamlit_app.py
 ```
 
