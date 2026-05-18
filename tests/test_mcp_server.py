@@ -702,6 +702,48 @@ def test_scaffold_streamlit_app_writes_file(tmp_path, mock_streamlit_connection)
     assert payload["code"] == contents
 
 
+def test_scaffold_streamlit_app_writes_uv_pyproject(tmp_path, mock_streamlit_connection) -> None:
+    """Generated one-off Streamlit apps include a uv dependency manifest."""
+    out_file = tmp_path / "streamlit project" / "app.py"
+    payload = json.loads(
+        scaffold_streamlit_app(
+            connection_name="sales",
+            query='EVALUATE ROW("X", 1)',
+            output_path=str(out_file),
+        )
+    )
+
+    pyproject = out_file.parent / "pyproject.toml"
+    assert pyproject.exists()
+    pyproject_text = pyproject.read_text(encoding="utf-8")
+    assert "streamlit>=1.37.0" in pyproject_text
+    assert "pandas>=2.3.0" in pyproject_text
+    assert "pywin32>=310; sys_platform == 'win32'" in pyproject_text
+    assert payload["pyproject_path"] == str(pyproject)
+    assert payload["pyproject_status"] == "created"
+    assert str(pyproject) in payload["files_created"]
+    assert 'cd "' in payload["instructions"]
+    assert "uv run streamlit run app.py" in payload["instructions"]
+
+
+def test_scaffold_streamlit_app_inline_instructions_use_uv_dependencies(
+    mock_streamlit_connection,
+) -> None:
+    """Copy/paste Streamlit scaffolds still return a uv command with dependencies."""
+    payload = json.loads(
+        scaffold_streamlit_app(
+            connection_name="sales",
+            query='EVALUATE ROW("X", 1)',
+        )
+    )
+
+    instructions = payload["instructions"]
+    assert '--with "streamlit>=1.37.0"' in instructions
+    assert '--with "pandas>=2.3.0"' in instructions
+    assert "--with \"pywin32>=310; sys_platform == 'win32'\"" in instructions
+    assert "streamlit run app.py" in instructions
+
+
 # ── _SERVER_INSTRUCTIONS content tests ───────────────────────────────
 
 

@@ -68,7 +68,13 @@ _SCAFFOLD_EXECUTOR_HELPERS = textwrap.dedent("""\
         if _is_mock_connection(conn_str):
             return _normalize_dataframe(_mock_to_pandas(dax_query, max_rows=max_rows))
 
-        import win32com.client  # Windows-only
+        try:
+            import win32com.client  # Windows-only
+        except ModuleNotFoundError as exc:
+            raise RuntimeError(
+                "pywin32 is required for MSOLAP/ADODB connections (it provides win32com). "
+                "Run this generated workspace with uv so its dependencies are installed."
+            ) from exc
 
         conn = None
         cmd = None
@@ -1696,6 +1702,27 @@ _PYPROJECT_TEMPLATE = textwrap.dedent("""\
 """)
 
 
+_STREAMLIT_PYPROJECT_TEMPLATE = textwrap.dedent("""\
+    [project]
+    name = "{project_name}"
+    version = "0.1.0"
+    description = "DAX Streamlit explorer"
+    requires-python = ">=3.12"
+    dependencies = [
+        "pandas>=2.3.0",
+        "pywin32>=310; sys_platform == 'win32'",
+        "streamlit>=1.37.0",
+    ]
+""")
+
+
+_STREAMLIT_UV_DEPENDENCY_ARGS = (
+    '--with "streamlit>=1.37.0" '
+    '--with "pandas>=2.3.0" '
+    '--with "pywin32>=310; sys_platform == \'win32\'"'
+)
+
+
 _README_TEMPLATE = textwrap.dedent("""\
     # {project_name}
 
@@ -1788,6 +1815,28 @@ def build_scaffold_connection_config(
 def scaffold_json_literal(value: Any) -> str:
     """Return a safe Python string literal containing JSON."""
     return repr(json.dumps(value, indent=4))
+
+
+def _safe_project_name(project_name: str) -> str:
+    """Return a simple PEP 508-compatible project name for generated pyprojects."""
+    return (project_name or "dax-streamlit-app").replace(" ", "-").lower()
+
+
+def quote_shell_arg(value: str) -> str:
+    if any(char.isspace() for char in value):
+        return f'"{value}"'
+    return value
+
+
+def render_streamlit_pyproject(*, project_name: str) -> str:
+    """Render a uv-compatible pyproject for a generated Streamlit app."""
+    return _STREAMLIT_PYPROJECT_TEMPLATE.format(project_name=_safe_project_name(project_name))
+
+
+def streamlit_uv_run_command(script_name: str = "app.py", *, include_dependencies: bool = False) -> str:
+    """Return a uv command that launches a generated Streamlit app."""
+    dependency_args = f"{_STREAMLIT_UV_DEPENDENCY_ARGS} " if include_dependencies else ""
+    return f"uv run {dependency_args}streamlit run {quote_shell_arg(script_name)}"
 
 
 def render_run_query_script(*, connection_config: dict[str, Any], query_filename: str) -> str:
@@ -1987,7 +2036,7 @@ def scaffold_workspace(
         project_name = output.name
 
     # Sanitize project name for pyproject
-    safe_project = project_name.replace(" ", "-").lower()
+    safe_project = _safe_project_name(project_name)
     connection_config = build_scaffold_connection_config(
         connection_string=connection_string,
         transport=transport,

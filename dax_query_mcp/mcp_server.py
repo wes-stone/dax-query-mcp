@@ -68,8 +68,11 @@ from .query_builder import (
 )
 from .scaffold import (
     build_scaffold_connection_config,
+    quote_shell_arg,
+    render_streamlit_pyproject,
     render_streamlit_single_query_app,
     scaffold_workspace,
+    streamlit_uv_run_command,
 )
 from .validated_query_library import (
     ValidatedQueryEntry,
@@ -2227,8 +2230,8 @@ def scaffold_streamlit_app(
     payload: dict[str, Any] = {
         "code": code,
         "instructions": (
-            f"Run the live explorer with: streamlit run "
-            f"{output_path or 'app.py'}"
+            "Save the code as app.py, then run the live explorer with: "
+            f"{streamlit_uv_run_command(include_dependencies=True)}"
         ),
     }
 
@@ -2236,7 +2239,25 @@ def scaffold_streamlit_app(
         out = Path(output_path)
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(code, encoding="utf-8")
+        created_files = [str(out)]
+        pyproject = out.parent / "pyproject.toml"
+        if pyproject.exists():
+            run_command = streamlit_uv_run_command(out.name, include_dependencies=True)
+            payload["pyproject_status"] = "existing"
+        else:
+            pyproject.write_text(
+                render_streamlit_pyproject(project_name=out.parent.name or out.stem),
+                encoding="utf-8",
+            )
+            created_files.append(str(pyproject))
+            run_command = streamlit_uv_run_command(out.name)
+            payload["pyproject_status"] = "created"
         payload["file_path"] = str(out)
+        payload["pyproject_path"] = str(pyproject)
+        payload["files_created"] = created_files
+        payload["instructions"] = (
+            f"Run the live explorer with: cd {quote_shell_arg(str(out.parent))} && {run_command}"
+        )
 
     return _to_json(payload)
 
